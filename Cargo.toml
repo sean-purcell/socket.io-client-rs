@@ -1,5 +1,5 @@
 [workspace]
 members = [
-    "socket-io-parseuri",
     "socket-io-client",
+    "socket-io-parse_uri",
 ]

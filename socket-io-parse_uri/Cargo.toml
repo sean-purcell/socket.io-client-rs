@@ -1,5 +1,5 @@
 [package]
-name = "socket-io-parseuri"
+name = "socket-io-parse_uri"
 version = "0.1.0"
 authors = ["Sean Purcell <me@seanp.xyz>"]
 edition = "2018"
@@ -9,3 +9,4 @@ edition = "2018"
 [dependencies]
 fancy-regex = "0.3"
 lazy_static = "1"
+thiserror = "1"
