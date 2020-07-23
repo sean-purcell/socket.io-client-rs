@@ -7,6 +7,7 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+async-tungstenite = { version = "0.7", features = ["async-tls"] }
+futures = "0.3"
 http = "0.2"
 thiserror = "1"
-tokio-tungstenite = "0.10"
