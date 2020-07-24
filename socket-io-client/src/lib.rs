@@ -89,7 +89,7 @@ async fn process_websocket<S>(
         mpsc::UnboundedSender<WsMessage>,
         mpsc::UnboundedReceiver<WsMessage>,
         oneshot::Sender<()>,
-        RemoteHandle<Result<(), WsError>>,
+        RemoteHandle<Result<(), Error>>,
     ),
     SpawnError,
 >
@@ -104,6 +104,22 @@ where
     let (receive, receive_handle) = process_stream(stream_0, send.clone(), spawn).await?;
 
     let (close_tx, close_rx) = oneshot::channel();
+
+    let task = || async move {
+        select! {
+            res = send_handle => {
+                Ok(res?)
+            }
+            res = receive_handle => {
+                Ok(res?)
+            }
+            _ = close_rx => {
+                drop(send_handle);
+                drop(receive_handle);
+                let sink = sink_1.lock().await
+            }
+        }
+    };
 
     Ok((send, receive, close_tx, receive_handle))
 }
@@ -173,7 +189,7 @@ where
                         }
                         _ => (),
                     }
-                    receive_tx.send(msg).await;
+                    let _ = receive_tx.send(msg).await;
                 }
                 Err(e) => return Err(e),
             }
@@ -181,7 +197,7 @@ where
     };
 
     let handle = spawn.spawn_with_handle(task())?;
-    started_rx.await;
+    let _ = started_rx.await;
 
     Ok((receive_rx, handle))
 }
