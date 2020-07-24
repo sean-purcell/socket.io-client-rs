@@ -8,6 +8,6 @@ edition = "2018"
 
 [dependencies]
 async-tungstenite = { version = "0.7", features = ["async-tls"] }
-futures = "0.3"
+futures = { version = "0.3.5", features = ["unstable", "bilock"] }
 http = "0.2"
 thiserror = "1"

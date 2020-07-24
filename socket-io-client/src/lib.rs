@@ -6,12 +6,13 @@ use async_tungstenite::{
     WebSocketStream,
 };
 use futures::{
-    channel::mpsc,
-    future::{Future, RemoteHandle},
+    channel::{mpsc, oneshot},
+    future::{Future, FutureExt, RemoteHandle},
     io::{AsyncRead, AsyncWrite},
+    lock::BiLock,
     pin_mut, select,
     sink::{Sink, SinkExt},
-    stream::{Stream, StreamExt},
+    stream::{SplitSink, SplitStream, Stream, StreamExt, TryStreamExt},
     task::{Spawn, SpawnError, SpawnExt},
 };
 use http::uri::{InvalidUri, Uri};
@@ -19,7 +20,8 @@ use http::uri::{InvalidUri, Uri};
 pub struct Client {
     send: mpsc::UnboundedSender<WsMessage>,
     receive: mpsc::UnboundedReceiver<WsMessage>,
-    handle: RemoteHandle<()>,
+    close: oneshot::Sender<()>,
+    handle: RemoteHandle<Result<(), WsError>>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -44,9 +46,6 @@ pub enum UriError {
     NoHost,
 }
 
-trait AsyncIo: AsyncRead + AsyncWrite + Unpin {}
-impl<S> AsyncIo for S where S: AsyncRead + AsyncWrite + Unpin {}
-
 pub type Host<'a> = &'a str;
 pub type Port = u16;
 
@@ -59,7 +58,7 @@ impl Client {
     where
         C: Fn(Host, Port) -> F,
         F: Future<Output = Result<S, E>>,
-        S: 'static + AsyncRead + AsyncWrite + Unpin,
+        S: 'static + AsyncRead + AsyncWrite + Unpin + Send,
         E: 'static + StdError,
     {
         let uri = uri.as_ref();
@@ -69,48 +68,122 @@ impl Client {
             .await
             .map_err(|e| Error::ConnectionError(Box::new(e)))?;
 
-        let connection: Box<dyn AsyncIo> = Box::new(connection);
-
         let (stream, _) = async_tls::client_async_tls(uri, connection).await?;
 
-        let (send, receive, handle) = process_websocket(stream, spawn)?;
+        let (send, receive, close, handle) = process_websocket(stream, &spawn).await?;
 
         Ok(Client {
             send,
             receive,
+            close,
             handle,
         })
     }
 }
 
-fn process_websocket(
-    stream: WebSocketStream<ClientStream<Box<dyn AsyncIo>>>,
-    spawn: impl Spawn,
+async fn process_websocket<S>(
+    stream: WebSocketStream<S>,
+    spawn: &impl Spawn,
 ) -> Result<
     (
         mpsc::UnboundedSender<WsMessage>,
         mpsc::UnboundedReceiver<WsMessage>,
-        RemoteHandle<()>,
+        oneshot::Sender<()>,
+        RemoteHandle<Result<(), WsError>>,
     ),
     SpawnError,
-> {
-    let (send_tx, send_rx) = mpsc::unbounded();
-    let (receive_tx, receive_rx) = mpsc::unbounded();
+>
+where
+    S: 'static + Unpin + AsyncRead + AsyncWrite + Send,
+{
+    let (sink, stream) = stream.split();
+    let (sink_0, sink_1) = BiLock::new(sink);
+    let (stream_0, stream_1) = BiLock::new(stream);
 
-    let process = || async move {
-        pin_mut!(send_rx, stream);
+    let (send, send_handle) = process_sink(sink_0, spawn).await?;
+    let (receive, receive_handle) = process_stream(stream_0, send.clone(), spawn).await?;
+
+    let (close_tx, close_rx) = oneshot::channel();
+
+    Ok((send, receive, close_tx, receive_handle))
+}
+
+async fn process_sink<S>(
+    sink: BiLock<S>,
+    spawn: &impl Spawn,
+) -> Result<
+    (
+        mpsc::UnboundedSender<WsMessage>,
+        RemoteHandle<Result<(), WsError>>,
+    ),
+    SpawnError,
+>
+where
+    S: 'static + Sink<WsMessage, Error = WsError> + Send,
+{
+    let (started_tx, started_rx) = oneshot::channel();
+    let (send_tx, send_rx) = mpsc::unbounded();
+
+    let task = || async move {
+        let mut sink = sink.lock().await;
+        let sink = sink.as_pin_mut();
+        started_tx.send(());
+
+        send_rx.map(|msg| Ok(msg)).forward(sink).await
+    };
+
+    let handle = spawn.spawn_with_handle(task())?;
+    started_rx.await;
+
+    Ok((send_tx, handle))
+}
+
+async fn process_stream<S>(
+    stream: BiLock<S>,
+    mut send: mpsc::UnboundedSender<WsMessage>,
+    spawn: &impl Spawn,
+) -> Result<
+    (
+        mpsc::UnboundedReceiver<WsMessage>,
+        RemoteHandle<Result<(), WsError>>,
+    ),
+    SpawnError,
+>
+where
+    S: 'static + Stream<Item = Result<WsMessage, WsError>> + Send,
+{
+    let (started_tx, started_rx) = oneshot::channel();
+    let (mut receive_tx, receive_rx) = mpsc::unbounded();
+
+    let task = || async move {
+        let mut stream = stream.lock().await;
+        started_tx.send(());
+
+        let mut stream = stream.as_pin_mut();
         loop {
-            select! {
-                msg = send_rx.next() => match stream.send(msg.unwrap() /* FIXME */).await {
-                    Ok(()) => (),
-                    Err(e) => { return e; }
-                },
+            let result = match stream.next().await {
+                Some(result) => result,
+                None => panic!("Stream shouldn't end without an Error"),
+            };
+            match result {
+                Ok(msg) => {
+                    match &msg {
+                        WsMessage::Ping(data) => {
+                            send.send(WsMessage::Pong(data.clone())).await;
+                        }
+                        _ => (),
+                    }
+                    receive_tx.send(msg).await;
+                }
+                Err(e) => return Err(e),
             }
         }
     };
-    let handle = spawn.spawn_with_handle(async { loop {} })?;
 
-    Ok((send_tx, receive_rx, handle))
+    let handle = spawn.spawn_with_handle(task())?;
+    started_rx.await;
+
+    Ok((receive_rx, handle))
 }
 
 fn parse_uri(uri: &str) -> Result<Uri, UriError> {
