@@ -167,7 +167,181 @@ fn parse_uri(uri: &str) -> Result<Uri, UriError> {
 
 #[cfg(test)]
 mod test {
+    use std::{convert::TryFrom, pin::Pin};
+
+    use futures::{
+        io::{self, ErrorKind},
+        ready,
+        task::{Context, Poll},
+    };
+    use pin_project::pin_project;
+
     use super::*;
+
+    #[pin_project(project = ReadProj)]
+    struct Read {
+        #[pin]
+        i: mpsc::UnboundedReceiver<u8>,
+    }
+
+    struct Write {
+        i: mpsc::UnboundedSender<u8>,
+    }
+
+    #[pin_project(project = RwProj)]
+    struct ReadWrite {
+        #[pin]
+        r: Read,
+        #[pin]
+        w: Write,
+    }
+
+    impl AsyncRead for Read {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            cx: &mut Context,
+            buf: &mut [u8],
+        ) -> Poll<Result<usize, io::Error>> {
+            if buf.len() == 0 {
+                return Poll::Ready(Ok(0));
+            }
+            let ReadProj { i } = self.project();
+            let next = ready!(i.poll_next(cx));
+            let result = match next {
+                Some(b) => {
+                    buf[0] = b;
+                    Ok(1)
+                }
+                None => Err(io::Error::new(
+                    ErrorKind::ConnectionAborted,
+                    "stream closed",
+                )),
+            };
+
+            Poll::Ready(result)
+        }
+    }
+
+    impl AsyncWrite for Write {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context,
+            buf: &[u8],
+        ) -> Poll<Result<usize, io::Error>> {
+            for b in buf.iter() {
+                match self.i.unbounded_send(*b) {
+                    Ok(()) => (),
+                    Err(e) => {
+                        assert!(e.is_disconnected());
+                        return Poll::Ready(Err(io::Error::new(
+                            ErrorKind::ConnectionAborted,
+                            "stream closed",
+                        )));
+                    }
+                }
+            }
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<Result<(), io::Error>> {
+            Poll::Ready(match self.i.is_closed() {
+                false => Ok(()),
+                true => Err(io::Error::new(
+                    ErrorKind::ConnectionAborted,
+                    "stream closed",
+                )),
+            })
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<Result<(), io::Error>> {
+            Poll::Ready(match self.i.is_closed() {
+                false => {
+                    self.i.close_channel();
+                    Ok(())
+                }
+                true => Err(io::Error::new(
+                    ErrorKind::ConnectionAborted,
+                    "stream closed",
+                )),
+            })
+        }
+    }
+
+    impl AsyncRead for ReadWrite {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            cx: &mut Context,
+            buf: &mut [u8],
+        ) -> Poll<Result<usize, io::Error>> {
+            let RwProj { r, .. } = self.project();
+            r.poll_read(cx, buf)
+        }
+    }
+
+    impl AsyncWrite for ReadWrite {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            cx: &mut Context,
+            buf: &[u8],
+        ) -> Poll<Result<usize, io::Error>> {
+            let RwProj { w, .. } = self.project();
+            w.poll_write(cx, buf)
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), io::Error>> {
+            let RwProj { w, .. } = self.project();
+            w.poll_flush(cx)
+        }
+
+        fn poll_close(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), io::Error>> {
+            let RwProj { w, .. } = self.project();
+            w.poll_close(cx)
+        }
+    }
+
+    fn create_io_streams() -> (Read, Write) {
+        let (send, receive) = mpsc::unbounded();
+        (Read { i: receive }, Write { i: send })
+    }
+
+    fn create_connection() -> (ReadWrite, ReadWrite) {
+        let (r0, w0) = create_io_streams();
+        let (r1, w1) = create_io_streams();
+
+        (ReadWrite { r: r0, w: w1 }, ReadWrite { r: r1, w: w0 })
+    }
+
+    #[test]
+    fn test_process_websocket() {
+        let spawn = async_executors::TokioTp::try_from(&mut tokio::runtime::Builder::new())
+            .expect("build threadpool");
+
+        let spawn_ref = &spawn;
+
+        let test = async move {
+            let (s0, s1) = create_connection();
+            let server = async_tungstenite::accept_async(s0);
+            let client = async_tungstenite::client_async("ws://localhost/", s1);
+            let (server, (client, _)) =
+                futures::try_join!(server, client).expect("Failed to connect servers");
+
+            let (_s_send, _s_recv, s_close, s_handle) =
+                process_websocket(server, spawn_ref).await.unwrap();
+            let (mut c_send, mut c_recv, mut c_close, c_handle) =
+                process_websocket(client, spawn_ref).await.unwrap();
+
+            c_send.unbounded_send(WsMessage::Ping(vec![0xde, 0xad, 0xbe, 0xef]));
+            let resp = c_recv.next().await.unwrap();
+            assert_eq!(resp, WsMessage::Pong(vec![0xde, 0xad, 0xbe, 0xef]));
+
+            let _ = c_close.send(());
+            assert!(c_handle.await.is_ok());
+            let _ = s_close.send(());
+            assert_eq!(format!("{:?}", s_handle.await), "Err(WebsocketError(Io(Custom { kind: ConnectionAborted, error: \"stream closed\" })))");
+        };
+
+        spawn.block_on(test);
+    }
 
     #[test]
     fn test_parse_uri() {
