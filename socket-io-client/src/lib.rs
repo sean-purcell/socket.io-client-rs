@@ -3,7 +3,7 @@
 use std::error::Error as StdError;
 
 use async_tungstenite::{
-    async_tls::{self, ClientStream},
+    async_tls,
     tungstenite::{Error as WsError, Message as WsMessage},
     WebSocketStream,
 };
@@ -11,10 +11,9 @@ use futures::{
     channel::{mpsc, oneshot},
     future::{Future, FutureExt, RemoteHandle},
     io::{AsyncRead, AsyncWrite},
-    lock::BiLock,
-    pin_mut, select,
-    sink::{Sink, SinkExt},
-    stream::{SplitSink, SplitStream, Stream, StreamExt, TryStreamExt},
+    select,
+    sink::SinkExt,
+    stream::StreamExt,
     task::{Spawn, SpawnError, SpawnExt},
 };
 use http::uri::{InvalidUri, Uri};
@@ -172,6 +171,7 @@ mod test {
     use futures::{
         io::{self, ErrorKind},
         ready,
+        stream::Stream,
         task::{Context, Poll},
     };
     use pin_project::pin_project;
@@ -327,17 +327,20 @@ mod test {
 
             let (_s_send, _s_recv, s_close, s_handle) =
                 process_websocket(server, spawn_ref).await.unwrap();
-            let (mut c_send, mut c_recv, mut c_close, c_handle) =
+            let (c_send, mut c_recv, c_close, c_handle) =
                 process_websocket(client, spawn_ref).await.unwrap();
 
-            c_send.unbounded_send(WsMessage::Ping(vec![0xde, 0xad, 0xbe, 0xef]));
+            c_send
+                .unbounded_send(WsMessage::Ping(vec![0xde, 0xad, 0xbe, 0xef]))
+                .unwrap();
             let resp = c_recv.next().await.unwrap();
             assert_eq!(resp, WsMessage::Pong(vec![0xde, 0xad, 0xbe, 0xef]));
 
             let _ = c_close.send(());
             assert!(c_handle.await.is_ok());
             let _ = s_close.send(());
-            assert_eq!(format!("{:?}", s_handle.await), "Err(WebsocketError(Io(Custom { kind: ConnectionAborted, error: \"stream closed\" })))");
+            assert_eq!(format!("{:?}", s_handle.await),
+                "Err(WebsocketError(Io(Custom { kind: ConnectionAborted, error: \"stream closed\" })))");
         };
 
         spawn.block_on(test);
