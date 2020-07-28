@@ -9,7 +9,7 @@ use socket_io_client::Client;
 #[structopt(name = "ws_connect")]
 struct Opt {
     /// The websocket server to connect to
-    uri: String,
+    url: String,
 }
 
 struct TokioSpawn();
@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let spawn = TokioSpawn();
 
-    Client::connect(opt.uri, connect, spawn).await?;
+    Client::connect(opt.url, connect, spawn).await?;
 
     Ok(())
 }

@@ -16,7 +16,7 @@ use futures::{
     stream::StreamExt,
     task::{Spawn, SpawnError, SpawnExt},
 };
-use http::uri::{InvalidUri, Uri};
+use url::Url;
 
 pub struct Client {
     pub send: mpsc::UnboundedSender<WsMessage>,
@@ -27,7 +27,7 @@ pub struct Client {
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("Failed to parse URI {0}: {1}")]
-    UriError(String, UriError),
+    UrlError(String, UrlError),
     #[error("Websocket error: {0}")]
     WebsocketError(#[from] WsError),
     #[error("Connection error: {0}")]
@@ -39,11 +39,11 @@ pub enum Error {
 }
 
 #[derive(thiserror::Error, Debug)]
-pub enum UriError {
+pub enum UrlError {
     #[error(transparent)]
-    Parse(#[from] InvalidUri),
+    Parse(#[from] url::ParseError),
     #[error("Invalid scheme: {0:?}")]
-    InvalidScheme(Option<String>),
+    InvalidScheme(String),
     #[error("No host")]
     NoHost,
 }
@@ -53,7 +53,7 @@ pub type Port = u16;
 
 impl Client {
     pub async fn connect<C, F, S, E>(
-        uri: impl AsRef<str>,
+        url: impl AsRef<str>,
         connect: C,
         spawn: impl Spawn,
     ) -> Result<Client, Error>
@@ -63,14 +63,17 @@ impl Client {
         S: 'static + AsyncRead + AsyncWrite + Unpin + Send,
         E: 'static + StdError + Send,
     {
-        let uri = uri.as_ref();
-        let uri = parse_uri(uri).map_err(|e| Error::UriError(uri.to_string(), e))?;
+        let url = url.as_ref();
+        let url = parse_url(url).map_err(|e| Error::UrlError(url.to_string(), e))?;
 
-        let connection = connect(uri.host().unwrap().into(), uri.port_u16().unwrap())
-            .await
-            .map_err(|e| Error::ConnectionError(Box::new(e)))?;
+        let connection = connect(
+            url.host_str().unwrap().into(),
+            url.port_or_known_default().unwrap(),
+        )
+        .await
+        .map_err(|e| Error::ConnectionError(Box::new(e)))?;
 
-        let (stream, _) = async_tls::client_async_tls(uri, connection).await?;
+        let (stream, _) = async_tls::client_async_tls(url.to_string(), connection).await?;
 
         let (send, receive, close, handle) = process_websocket(stream, &spawn).await?;
 
@@ -154,21 +157,19 @@ where
     Ok((send_tx, receive_rx, close_tx, handle))
 }
 
-fn parse_uri(uri: &str) -> Result<Uri, UriError> {
-    use std::convert::TryFrom;
+fn parse_url(url: &str) -> Result<Url, UrlError> {
+    let mut url = Url::parse(url)?;
 
-    let uri = Uri::try_from(uri)?;
-
-    let (scheme, port) = match uri.scheme_str() {
-        Some("http") | Some("ws") => ("ws", 80),
-        Some("https") | Some("wss") => ("wss", 443),
-        s => return Err(UriError::InvalidScheme(s.map(|s| s.to_string()))),
+    let scheme = match url.scheme() {
+        "http" | "ws" => "ws",
+        "https" | "wss" => "wss",
+        s => return Err(UrlError::InvalidScheme(s.to_string())),
     };
 
-    let host = uri.host().ok_or(UriError::NoHost)?;
-    let port = uri.port_u16().unwrap_or(port);
-    let path_and_query = uri.path_and_query().map(|x| x.as_str()).unwrap_or("/");
-    Ok(Uri::try_from(format!("{}://{}:{}{}", scheme, host, port, path_and_query)).unwrap())
+    url.set_scheme(scheme).unwrap();
+    let _ = url.host().ok_or(UrlError::NoHost)?;
+
+    Ok(url)
 }
 
 #[cfg(test)]
@@ -354,12 +355,13 @@ mod test {
     }
 
     #[test]
-    fn test_parse_uri() {
-        let p = parse_uri("https://example.com/").unwrap();
-        assert_eq!(p, "wss://example.com:443/");
-        let p = parse_uri("http://localhost:8000/").unwrap();
-        assert_eq!(p, "ws://localhost:8000/");
-        let p = parse_uri("localhost:8000");
-        assert_eq!(format!("{:?}", p), "Err(InvalidScheme(None))");
+    fn test_parse_url() {
+        let p = parse_url("https://example.com/").unwrap();
+        assert_eq!(p.to_string(), "wss://example.com/");
+        assert_eq!(p.port_or_known_default().unwrap(), 443);
+        let p = parse_url("http://localhost:8000/").unwrap();
+        assert_eq!(p.to_string(), "ws://localhost:8000/");
+        let p = parse_url("localhost:8000");
+        assert_eq!(format!("{:?}", p), "Err(InvalidScheme(\"localhost\"))");
     }
 }
