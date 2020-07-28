@@ -357,5 +357,9 @@ mod test {
     fn test_parse_uri() {
         let p = parse_uri("https://example.com/").unwrap();
         assert_eq!(p, "wss://example.com:443/");
+        let p = parse_uri("http://localhost:8000/").unwrap();
+        assert_eq!(p, "ws://localhost:8000/");
+        let p = parse_uri("localhost:8000");
+        assert_eq!(format!("{:?}", p), "Err(InvalidScheme(None))");
     }
 }
