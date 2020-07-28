@@ -1,5 +1,12 @@
+use std::time::Duration;
+
 use async_tungstenite::tokio::TokioAdapter;
-use futures::task::{FutureObj, Spawn, SpawnError};
+use futures::{
+    future::FutureExt,
+    select,
+    stream::StreamExt,
+    task::{FutureObj, Spawn, SpawnError},
+};
 use structopt::StructOpt;
 use tokio::{io, net::TcpStream};
 
@@ -10,6 +17,10 @@ use socket_io_client::Client;
 struct Opt {
     /// The websocket server to connect to
     url: String,
+
+    /// Timeout seconds
+    #[structopt(short, long, default_value = "1")]
+    timeout: u64,
 }
 
 struct TokioSpawn();
@@ -33,7 +44,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let spawn = TokioSpawn();
 
-    Client::connect(opt.url, connect, spawn).await?;
+    let mut client = Client::connect(opt.url, connect, spawn).await?;
+
+    let mut timeout = tokio::time::delay_for(Duration::from_secs(opt.timeout)).fuse();
+
+    loop {
+        select! {
+            _ = timeout => break,
+            msg = client.receive.next() => {
+                println!("{:?}", msg);
+            }
+        }
+    }
 
     Ok(())
 }
