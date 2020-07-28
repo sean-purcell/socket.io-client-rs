@@ -64,7 +64,9 @@ impl Client {
         E: 'static + StdError + Send,
     {
         let url = url.as_ref();
-        let url = parse_url(url).map_err(|e| Error::UrlError(url.to_string(), e))?;
+        let mut url = parse_url(url).map_err(|e| Error::UrlError(url.to_string(), e))?;
+
+        add_socketio_query_params(&mut url);
 
         let connection = connect(
             url.host_str().unwrap().into(),
@@ -170,6 +172,12 @@ fn parse_url(url: &str) -> Result<Url, UrlError> {
     let _ = url.host().ok_or(UrlError::NoHost)?;
 
     Ok(url)
+}
+
+fn add_socketio_query_params(url: &mut Url) {
+    url.query_pairs_mut()
+        .append_pair("EIO", "4")
+        .append_pair("transport", "websocket");
 }
 
 #[cfg(test)]
