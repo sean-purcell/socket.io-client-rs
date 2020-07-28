@@ -14,5 +14,7 @@ thiserror = "1"
 
 [dev-dependencies]
 async_executors = { version = "0.3", features = ["tokio_tp"] }
+async-tungstenite = { version = "0.7", features = ["tokio-runtime"] }
 pin-project = "0.4"
+structopt = "0.3"
 tokio = { version = "0.2", features = ["full"] }

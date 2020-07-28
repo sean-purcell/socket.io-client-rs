@@ -19,10 +19,9 @@ use futures::{
 use http::uri::{InvalidUri, Uri};
 
 pub struct Client {
-    send: mpsc::UnboundedSender<WsMessage>,
-    receive: mpsc::UnboundedReceiver<WsMessage>,
-    close: oneshot::Sender<()>,
-    handle: RemoteHandle<Result<(), Error>>,
+    pub send: mpsc::UnboundedSender<WsMessage>,
+    pub receive: mpsc::UnboundedReceiver<WsMessage>,
+    close_handle: Option<(oneshot::Sender<()>, RemoteHandle<Result<(), Error>>)>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -35,6 +34,8 @@ pub enum Error {
     ConnectionError(Box<dyn StdError + Send>),
     #[error("Failed to spawn task: {0}")]
     SpawnError(#[from] SpawnError),
+    #[error("Already closed")]
+    AlreadyClosed,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -47,7 +48,7 @@ pub enum UriError {
     NoHost,
 }
 
-pub type Host<'a> = &'a str;
+pub type Host = String;
 pub type Port = u16;
 
 impl Client {
@@ -57,7 +58,7 @@ impl Client {
         spawn: impl Spawn,
     ) -> Result<Client, Error>
     where
-        C: Fn(Host, Port) -> F,
+        C: 'static + Fn(Host, Port) -> F,
         F: Future<Output = Result<S, E>>,
         S: 'static + AsyncRead + AsyncWrite + Unpin + Send,
         E: 'static + StdError + Send,
@@ -65,7 +66,7 @@ impl Client {
         let uri = uri.as_ref();
         let uri = parse_uri(uri).map_err(|e| Error::UriError(uri.to_string(), e))?;
 
-        let connection = connect(uri.host().unwrap(), uri.port_u16().unwrap())
+        let connection = connect(uri.host().unwrap().into(), uri.port_u16().unwrap())
             .await
             .map_err(|e| Error::ConnectionError(Box::new(e)))?;
 
@@ -76,9 +77,15 @@ impl Client {
         Ok(Client {
             send,
             receive,
-            close,
-            handle,
+            close_handle: Some((close, handle)),
         })
+    }
+
+    pub async fn close(&mut self) -> Result<(), Error> {
+        let (close, handle) = self.close_handle.take().ok_or(Error::AlreadyClosed)?;
+
+        let _ = close.send(());
+        handle.await
     }
 }
 
