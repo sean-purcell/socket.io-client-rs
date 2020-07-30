@@ -253,8 +253,8 @@ mod test {
                     Ok(1)
                 }
                 None => Err(io::Error::new(
-                    ErrorKind::ConnectionAborted,
-                    "stream closed",
+                    ErrorKind::ConnectionReset,
+                    "stream closed for read",
                 )),
             };
 
@@ -274,8 +274,8 @@ mod test {
                     Err(e) => {
                         assert!(e.is_disconnected());
                         return Poll::Ready(Err(io::Error::new(
-                            ErrorKind::ConnectionAborted,
-                            "stream closed",
+                            ErrorKind::ConnectionReset,
+                            "stream closed for write",
                         )));
                     }
                 }
