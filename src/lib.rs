@@ -86,6 +86,30 @@ impl Client {
         })
     }
 
+    pub async fn from_stream<S>(
+        url: impl AsRef<str>,
+        connection: S,
+        spawn: impl Spawn,
+    ) -> Result<Client, Error>
+    where
+        S: 'static + AsyncRead + AsyncWrite + Unpin + Send,
+    {
+        let url = url.as_ref();
+        let mut url = parse_url(url).map_err(|e| Error::UrlError(url.to_string(), e))?;
+
+        add_socketio_query_params(&mut url);
+
+        let (stream, _) = async_tls::client_async_tls(url.to_string(), connection).await?;
+
+        let (send, receive, close, handle) = process_websocket(stream, &spawn).await?;
+
+        Ok(Client {
+            send,
+            receive,
+            close_handle: Some((close, handle)),
+        })
+    }
+
     pub async fn close(&mut self) -> Result<(), Error> {
         let (close, handle) = self.close_handle.take().ok_or(Error::AlreadyClosed)?;
 
