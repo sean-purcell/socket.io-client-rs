@@ -1,10 +1,23 @@
 language: rust
 rust:
-    - stable
-    - beta
-    - nightly
+- stable
+- beta
+- nightly
+
+
+before_install:
+- nvm install node
+
+install:
+- cargo build --verbose
+- cd node-tests && npm install
+
+script:
+- cargo test --verbose
+- cd node-tests && ./connect_test.sh
+
 jobs:
-    allow_failures:
-        - rust: nightly
-    fast_finish: true
+  allow_failures:
+  - rust: nightly
+  fast_finish: true
 cache: cargo
