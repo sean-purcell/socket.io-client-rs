@@ -39,8 +39,10 @@ async fn connect(host: String, port: u16) -> Result<TokioAdapter<TcpStream>, io:
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    env_logger::init();
+
     let opt = Opt::from_args();
-    println!("Args: {:?}", opt);
+    log::info!("Args: {:?}", opt);
 
     let spawn = TokioSpawn();
 
@@ -56,6 +58,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+
+    client.close().await?;
 
     Ok(())
 }
