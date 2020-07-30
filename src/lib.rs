@@ -145,8 +145,14 @@ where
             select! {
                 result = next => {
                     let msg = match result {
-                        Some(msg) => msg,
-                        None => panic!("WebSocketStream closed unexpectedly"),
+                        Some(msg) => {
+                            log::trace!("received message: {:?}", msg);
+                            msg
+                        },
+                        None => {
+                            log::trace!("got None, stream ended");
+                            return Ok(()); // Connection closed without errors
+                        }
                     };
                     next = stream.next().fuse();
                     match msg {
@@ -162,6 +168,7 @@ where
                         Some(msg) => msg,
                         None => panic!("Sending stream closed unexpectedly"),
                     };
+                    log::trace!("sending message: {:?}", msg);
                     match sink.send(msg).await {
                         Ok(()) => (),
                         Err(e) => return Err(e.into()),
@@ -174,8 +181,19 @@ where
         }
         drop(next);
         let mut ws_stream = sink.reunite(stream).expect("Reunite should succeed");
+        log::debug!("Sending close message");
         let _ = ws_stream.close(None).await;
-        Ok(())
+        // Now we want to keep reading until the stream closed
+        loop {
+            match ws_stream.next().await {
+                Some(Ok(msg)) => receive_tx
+                    .send(msg)
+                    .await
+                    .expect("Receiver dropped unexpectedly"),
+                Some(Err(e)) => return Err(e.into()),
+                None => return Ok(()), // Connection closed without errors
+            }
+        }
     };
 
     let handle = spawn.spawn_with_handle(task())?;
@@ -206,7 +224,7 @@ fn add_socketio_query_params(url: &mut Url) {
 
 #[cfg(test)]
 mod test {
-    use std::{convert::TryFrom, pin::Pin};
+    use std::{convert::TryFrom, pin::Pin, sync::Once};
 
     use futures::{
         io::{self, ErrorKind},
@@ -217,6 +235,8 @@ mod test {
     use pin_project::pin_project;
 
     use super::*;
+
+    static LOG: Once = Once::new();
 
     #[pin_project(project = ReadProj)]
     struct Read {
@@ -284,26 +304,14 @@ mod test {
         }
 
         fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<Result<(), io::Error>> {
-            Poll::Ready(match self.i.is_closed() {
-                false => Ok(()),
-                true => Err(io::Error::new(
-                    ErrorKind::ConnectionAborted,
-                    "stream closed",
-                )),
-            })
+            Poll::Ready(Ok(()))
         }
 
         fn poll_close(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<Result<(), io::Error>> {
-            Poll::Ready(match self.i.is_closed() {
-                false => {
-                    self.i.close_channel();
-                    Ok(())
-                }
-                true => Err(io::Error::new(
-                    ErrorKind::ConnectionAborted,
-                    "stream closed",
-                )),
-            })
+            if !self.i.is_closed() {
+                self.i.close_channel();
+            }
+            Poll::Ready(Ok(()))
         }
     }
 
@@ -339,6 +347,10 @@ mod test {
         }
     }
 
+    fn init_log() {
+        LOG.call_once(|| env_logger::init());
+    }
+
     fn create_io_streams() -> (Read, Write) {
         let (send, receive) = mpsc::unbounded();
         (Read { i: receive }, Write { i: send })
@@ -353,6 +365,8 @@ mod test {
 
     #[test]
     fn test_process_websocket() {
+        init_log();
+
         let spawn = async_executors::TokioTp::try_from(&mut tokio::runtime::Builder::new())
             .expect("build threadpool");
 
@@ -363,7 +377,7 @@ mod test {
             let server = async_tungstenite::accept_async(s0);
             let client = async_tungstenite::client_async("ws://localhost/", s1);
             let (server, (client, _)) =
-                futures::try_join!(server, client).expect("Failed to connect servers");
+                futures::try_join!(server, client).expect("Failed to connect websockets");
 
             let (_s_send, _s_recv, s_close, s_handle) =
                 process_websocket(server, spawn_ref).await.unwrap();
@@ -377,10 +391,48 @@ mod test {
             assert_eq!(resp, WsMessage::Pong(vec![0xde, 0xad, 0xbe, 0xef]));
 
             let _ = c_close.send(());
-            assert!(c_handle.await.is_ok());
+            let c_result = c_handle.await;
+            assert!(c_result.is_ok());
             let _ = s_close.send(());
-            assert_eq!(format!("{:?}", s_handle.await),
-                "Err(WebsocketError(Io(Custom { kind: ConnectionAborted, error: \"stream closed\" })))");
+            assert!(s_handle.await.is_ok());
+        };
+
+        spawn.block_on(test);
+    }
+
+    #[test]
+    fn test_close() {
+        init_log();
+
+        let spawn = async_executors::TokioTp::try_from(&mut tokio::runtime::Builder::new())
+            .expect("build threadpool");
+
+        let spawn_ref = &spawn;
+
+        let test = async move {
+            let (s0, s1) = create_connection();
+            let server =
+                async_tungstenite::accept_async(s0).map(|x| x.map_err(Error::WebsocketError));
+            let client = Client::from_stream("ws://localhost/", s1, spawn_ref);
+            let (server, mut client) =
+                futures::try_join!(server, client).expect("Failed to connect websockets");
+
+            let (_s_send, _s_recv, s_close, s_handle) =
+                process_websocket(server, spawn_ref).await.unwrap();
+
+            client
+                .send
+                .unbounded_send(WsMessage::Ping(vec![0xde, 0xad, 0xbe, 0xef]))
+                .unwrap();
+            let resp = client.receive.next().await.unwrap();
+            assert_eq!(resp, WsMessage::Pong(vec![0xde, 0xad, 0xbe, 0xef]));
+
+            let _ = s_close.send(());
+            s_handle.await.unwrap();
+
+            assert_eq!(client.receive.next().await, Some(WsMessage::Close(None)));
+            assert_eq!(client.receive.next().await, None);
+            client.close().await.unwrap();
         };
 
         spawn.block_on(test);
