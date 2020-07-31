@@ -2,7 +2,7 @@ use async_tungstenite::tungstenite::Message as WsMessage;
 use serde::{Deserialize, Serialize};
 use serde_json::error::Error as JsonError;
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
 pub enum Packet<'a> {
     #[serde(borrow)]
     Open(Open<'a>),
@@ -13,14 +13,15 @@ pub enum Packet<'a> {
     Message(Message<'a>),
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct Open<'a> {
     sid: &'a str,
     ping_timeout: u64,
     ping_interval: u64,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
 pub enum Message<'a> {
     Text(&'a str),
     Binary(&'a [u8]),
@@ -87,7 +88,7 @@ impl Decoder {
                 if self.state != State::Initial {
                     Err(Error::SecondOpen)
                 } else {
-                    let result = parse_open(text)?;
+                    let result = parse_open(&text[1..])?;
                     self.state = State::Active;
                     Ok(Packet::Open(result))
                 }
@@ -133,4 +134,33 @@ impl Decoder {
 
 fn parse_open<'a>(text: &'a str) -> Result<Open<'a>, Error> {
     Ok(serde_json::from_str(text)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_close() {
+        let mut decoder = Decoder::new();
+
+        assert!(decoder.decode(&WsMessage::Close(None)).is_err());
+    }
+
+    #[test]
+    fn decode_open() {
+        let mut decoder = Decoder::new();
+
+        let msg = WsMessage::Text(
+            "0{\"sid\":\"0vtWsEAcESDOoPs8AAAA\",\"upgrades\":[],\"pingInterval\":25000,\"pingTimeout\":5000}".to_string());
+        let packet = decoder.decode(&msg).unwrap();
+        let expected = Packet::Open(Open {
+            sid: "0vtWsEAcESDOoPs8AAAA",
+            ping_interval: 25000,
+            ping_timeout: 5000,
+        });
+        assert_eq!(packet, expected);
+        let result = decoder.decode(&msg);
+        assert!(result.is_err());
+    }
 }

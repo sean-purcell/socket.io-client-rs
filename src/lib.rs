@@ -225,7 +225,7 @@ fn add_socketio_query_params(url: &mut Url) {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use std::{convert::TryFrom, pin::Pin, sync::Once};
 
     use futures::{
