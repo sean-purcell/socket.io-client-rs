@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use async_tungstenite::tokio::TokioAdapter;
+use async_tungstenite::{tokio::TokioAdapter, tungstenite::Message as WsMessage};
 use futures::{
     future::FutureExt,
     select,
@@ -21,6 +21,10 @@ struct Opt {
     /// Timeout seconds
     #[structopt(short, long, default_value = "1")]
     timeout: u64,
+
+    /// Send a connect message for the provided namespace
+    #[structopt(short, long)]
+    namespace: Option<String>,
 }
 
 struct TokioSpawn();
@@ -49,6 +53,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut client = Client::connect(opt.url, connect, spawn).await?;
 
     let mut timeout = tokio::time::delay_for(Duration::from_secs(opt.timeout)).fuse();
+
+    if let Some(namespace) = &opt.namespace {
+        client
+            .send
+            .unbounded_send(WsMessage::Text(format!("40{},", namespace)))?;
+    }
 
     loop {
         select! {
