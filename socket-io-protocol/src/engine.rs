@@ -1,6 +1,6 @@
-use async_tungstenite::tungstenite::Message as WsMessage;
 use serde::{Deserialize, Serialize};
 use serde_json::error::Error as JsonError;
+use tungstenite::Message as WsMessage;
 
 #[derive(Debug, PartialEq)]
 pub enum Packet<'a> {

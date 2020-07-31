@@ -10,11 +10,11 @@ before_install:
 
 install:
 - cargo build --verbose --examples --tests --lib
-- cd node-tests && npm install
+- cd $TRAVIS_BUILD_DIR/socket-io-client/node-tests && npm install
 
 script:
 - cargo test --verbose
-- cd $TRAVIS_BUILD_DIR/node-tests && ./connect_test.sh
+- cd $TRAVIS_BUILD_DIR/socket-io-client/node-tests && ./connect_test.sh
 
 jobs:
   allow_failures:

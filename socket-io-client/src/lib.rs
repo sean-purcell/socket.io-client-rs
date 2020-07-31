@@ -18,8 +18,6 @@ use futures::{
 };
 use url::Url;
 
-pub mod protocol;
-
 pub struct Client {
     pub send: mpsc::UnboundedSender<WsMessage>,
     pub receive: mpsc::UnboundedReceiver<WsMessage>,
