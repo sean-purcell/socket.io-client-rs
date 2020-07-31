@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::value::RawValue;
@@ -5,9 +7,10 @@ use serde_json::value::RawValue;
 use super::engine::Message as EngineMessage;
 
 #[derive(Debug)]
+#[cfg_attr(test, derive(PartialEq))]
 pub struct Packet<'a> {
     pub data: PacketData<'a>,
-    pub namespace: Option<&'a str>,
+    pub namespace: Option<Cow<'a, str>>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -21,6 +24,7 @@ pub enum PacketKind {
 }
 
 #[derive(Debug)]
+#[cfg_attr(test, derive(PartialEq))]
 pub enum PacketData<'a> {
     Connect,
     Disconnect,
@@ -31,12 +35,14 @@ pub enum PacketData<'a> {
 }
 
 #[derive(Debug)]
+#[cfg_attr(test, derive(PartialEq))]
 pub struct Event<'a> {
     pub id: Option<u64>,
     pub data: Data<'a>,
 }
 
 #[derive(Debug)]
+#[cfg_attr(test, derive(PartialEq))]
 pub struct Ack<'a> {
     pub id: u64,
     pub data: Data<'a>,
@@ -44,21 +50,31 @@ pub struct Ack<'a> {
 
 #[derive(Debug, Deserialize)]
 #[serde(transparent)]
-pub struct Data<'a>(#[serde(borrow)] Vec<&'a RawValue>);
+pub struct Data<'a>(#[serde(borrow)] Vec<Cow<'a, RawValue>>);
 
 #[derive(Debug)]
+#[cfg_attr(test, derive(PartialEq))]
 pub struct Partial<'a>(Parse<'a>);
 
 #[derive(Debug)]
+#[cfg_attr(test, derive(PartialEq))]
 pub enum DeserializeResult<'a> {
     Packet(Packet<'a>),
     DataNeeded(Partial<'a>),
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum Error {}
+pub enum Error {
+    #[error("Received non-attachment binary message")]
+    NonAttachmentBinary(Vec<u8>),
+    #[error("Invalid message: {0}")]
+    InvalidMessage(String),
+    #[error("Invalid extra data included in {0} packet: {1}")]
+    InvalidExtraData(&'static str, String),
+}
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
+#[cfg_attr(test, derive(PartialEq))]
 struct Parse<'a> {
     kind: PacketKind,
     attachments: Option<u64>,
@@ -76,8 +92,8 @@ lazy_static::lazy_static! {
 
 pub fn deserialize<'a>(msg: EngineMessage<'a>) -> Result<DeserializeResult<'a>, Error> {
     match msg {
-        EngineMessage::Text(_text) => unimplemented!(),
-        EngineMessage::Binary(_data) => unimplemented!(),
+        EngineMessage::Text(text) => deserialize_text(text),
+        EngineMessage::Binary(data) => Err(Error::NonAttachmentBinary(data.to_vec())),
     }
 }
 
@@ -115,9 +131,38 @@ fn parse_text<'a>(text: &'a str) -> Option<Parse<'a>> {
     })
 }
 
+fn deserialize_text<'a>(text: &'a str) -> Result<DeserializeResult<'a>, Error> {
+    let parse = parse_text(text).ok_or_else(|| Error::InvalidMessage(text.to_string()))?;
+    match parse.kind {
+        PacketKind::Connect => {
+            if parse.attachments.is_some() || parse.id.is_some() || parse.data.is_some() {
+                Err(Error::InvalidExtraData("connect", text.to_string()))
+            } else {
+                Ok(DeserializeResult::Packet(Packet {
+                    data: PacketData::Connect,
+                    namespace: parse.namespace.map(|x| x.into()),
+                }))
+            }
+        }
+        _ => unimplemented!(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl<'a, 'b> PartialEq<Data<'b>> for Data<'a> {
+        fn eq(&self, other: &Data<'b>) -> bool {
+            if self.0.len() != other.0.len() {
+                return false;
+            }
+            self.0
+                .iter()
+                .zip(other.0.iter())
+                .all(|(r0, r1)| r0.get() == r1.get())
+        }
+    }
 
     #[test]
     fn test_deserialize_re() {
@@ -168,6 +213,18 @@ mod tests {
                 id: Some(1),
                 data: Some("[\"binary namespaced message with ack\"]"),
             }
+        );
+    }
+
+    #[test]
+    fn test_deserialize_connect() {
+        let m = "0/nsp,";
+        assert_eq!(
+            deserialize(EngineMessage::Text(m)).unwrap(),
+            DeserializeResult::Packet(Packet {
+                data: PacketData::Connect,
+                namespace: Some("/nsp".into())
+            })
         );
     }
 }

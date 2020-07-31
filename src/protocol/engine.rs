@@ -2,14 +2,12 @@ use async_tungstenite::tungstenite::Message as WsMessage;
 use serde::{Deserialize, Serialize};
 use serde_json::error::Error as JsonError;
 
-#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum Packet<'a> {
-    #[serde(borrow)]
     Open(Open<'a>),
     Close,
     Ping,
     Pong,
-    #[serde(borrow)]
     Message(Message<'a>),
 }
 
@@ -21,7 +19,7 @@ pub struct Open<'a> {
     ping_interval: u64,
 }
 
-#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum Message<'a> {
     Text(&'a str),
     Binary(&'a [u8]),
