@@ -13,6 +13,7 @@ io.on('connect', socket => {
 io.of('/nsp').on('connect', socket => {
     console.error('connection to /nsp received');
     socket.binary(true).emit('binary namespaced message with ack', (ack) => console.log);
+    socket.disconnect();
 });
 
 io.attach(port);

@@ -133,17 +133,19 @@ fn parse_text<'a>(text: &'a str) -> Option<Parse<'a>> {
 
 fn deserialize_text<'a>(text: &'a str) -> Result<DeserializeResult<'a>, Error> {
     let parse = parse_text(text).ok_or_else(|| Error::InvalidMessage(text.to_string()))?;
-    match parse.kind {
-        PacketKind::Connect => {
-            if parse.attachments.is_some() || parse.id.is_some() || parse.data.is_some() {
-                Err(Error::InvalidExtraData("connect", text.to_string()))
-            } else {
-                Ok(DeserializeResult::Packet(Packet {
-                    data: PacketData::Connect,
-                    namespace: parse.namespace.map(|x| x.into()),
-                }))
-            }
+    let dataless = |name, kind| {
+        if parse.attachments.is_some() || parse.id.is_some() || parse.data.is_some() {
+            Err(Error::InvalidExtraData(name, text.to_string()))
+        } else {
+            Ok(DeserializeResult::Packet(Packet {
+                data: kind,
+                namespace: parse.namespace.map(|x| x.into()),
+            }))
         }
+    };
+    match parse.kind {
+        PacketKind::Connect => dataless("connect", PacketData::Connect),
+        PacketKind::Disconnect => dataless("disconnect", PacketData::Disconnect),
         _ => unimplemented!(),
     }
 }
@@ -223,6 +225,18 @@ mod tests {
             deserialize(EngineMessage::Text(m)).unwrap(),
             DeserializeResult::Packet(Packet {
                 data: PacketData::Connect,
+                namespace: Some("/nsp".into())
+            })
+        );
+    }
+
+    #[test]
+    fn test_deserialize_disconnect() {
+        let m = "1/nsp,";
+        assert_eq!(
+            deserialize(EngineMessage::Text(m)).unwrap(),
+            DeserializeResult::Packet(Packet {
+                data: PacketData::Disconnect,
                 namespace: Some("/nsp".into())
             })
         );
