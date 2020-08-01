@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use regex::Regex;
 use serde::Deserialize;
-use serde_json::value::RawValue;
+use serde_json::{value::RawValue, Error as JsonError};
 
 use super::engine::Message as EngineMessage;
 
@@ -38,19 +38,19 @@ pub enum PacketData<'a> {
 #[cfg_attr(test, derive(PartialEq))]
 pub struct Event<'a> {
     pub id: Option<u64>,
-    pub data: Data<'a>,
+    pub args: Args<'a>,
 }
 
 #[derive(Debug)]
 #[cfg_attr(test, derive(PartialEq))]
 pub struct Ack<'a> {
     pub id: u64,
-    pub data: Data<'a>,
+    pub args: Args<'a>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(transparent)]
-pub struct Data<'a>(#[serde(borrow)] Vec<Cow<'a, RawValue>>);
+pub struct Args<'a>(#[serde(borrow)] Vec<Cow<'a, RawValue>>);
 
 #[derive(Debug)]
 #[cfg_attr(test, derive(PartialEq))]
@@ -71,6 +71,10 @@ pub enum Error {
     InvalidMessage(String),
     #[error("Invalid extra data included in {0} packet: {1}")]
     InvalidExtraData(&'static str, String),
+    #[error("Missing data in {0} packet: {1}")]
+    MissingData(&'static str, String),
+    #[error("Invalid json in message data: {0}, {1:?}")]
+    InvalidDataJson(String, JsonError),
 }
 
 #[derive(Debug)]
@@ -80,7 +84,7 @@ struct Parse<'a> {
     attachments: Option<u64>,
     namespace: Option<&'a str>,
     id: Option<u64>,
-    data: Option<&'a str>,
+    args: Option<&'a str>,
 }
 
 lazy_static::lazy_static! {
@@ -121,41 +125,71 @@ fn parse_text<'a>(text: &'a str) -> Option<Parse<'a>> {
     let attachments = captures.get(3).map(|x| x.as_str().parse::<u64>().unwrap());
     let namespace = captures.get(5).map(|x| x.as_str());
     let id = captures.get(6).map(|x| x.as_str().parse::<u64>().unwrap());
-    let data = captures.get(7).map(|x| x.as_str());
+    let args = captures.get(7).map(|x| x.as_str());
     Some(Parse {
         kind,
         attachments,
         namespace,
         id,
-        data,
+        args,
     })
 }
 
 fn deserialize_text<'a>(text: &'a str) -> Result<DeserializeResult<'a>, Error> {
     let parse = parse_text(text).ok_or_else(|| Error::InvalidMessage(text.to_string()))?;
-    let dataless = |name, kind| {
-        if parse.attachments.is_some() || parse.id.is_some() || parse.data.is_some() {
+    let namespace = parse.namespace.map(|x| x.into());
+    let argsless = |name, kind| {
+        if parse.attachments.is_some() || parse.id.is_some() || parse.args.is_some() {
             Err(Error::InvalidExtraData(name, text.to_string()))
         } else {
             Ok(DeserializeResult::Packet(Packet {
                 data: kind,
-                namespace: parse.namespace.map(|x| x.into()),
+                namespace: namespace.clone(),
+            }))
+        }
+    };
+    let normal = |name, ack| {
+        if parse.attachments.is_some() {
+            Err(Error::InvalidExtraData(name, text.to_string()))
+        } else if parse.args.is_none() {
+            Err(Error::MissingData(name, text.to_string()))
+        } else if ack && parse.id.is_none() {
+            Err(Error::MissingData(name, text.to_string()))
+        } else {
+            let args = deserialize_args(parse.args.unwrap())?;
+            let data = if !ack {
+                PacketData::Event(Event { id: parse.id, args })
+            } else {
+                PacketData::Ack(Ack {
+                    id: parse.id.unwrap(),
+                    args,
+                })
+            };
+            Ok(DeserializeResult::Packet(Packet {
+                data,
+                namespace: namespace.clone(),
             }))
         }
     };
     match parse.kind {
-        PacketKind::Connect => dataless("connect", PacketData::Connect),
-        PacketKind::Disconnect => dataless("disconnect", PacketData::Disconnect),
+        PacketKind::Connect => argsless("connect", PacketData::Connect),
+        PacketKind::Disconnect => argsless("disconnect", PacketData::Disconnect),
+        PacketKind::Event => normal("event", false),
+        PacketKind::Ack => normal("ack", true),
         _ => unimplemented!(),
     }
+}
+
+fn deserialize_args<'a>(args: &'a str) -> Result<Args<'a>, Error> {
+    serde_json::from_str(args).map_err(|err| Error::InvalidDataJson(args.to_string(), err))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    impl<'a, 'b> PartialEq<Data<'b>> for Data<'a> {
-        fn eq(&self, other: &Data<'b>) -> bool {
+    impl<'a, 'b> PartialEq<Args<'b>> for Args<'a> {
+        fn eq(&self, other: &Args<'b>) -> bool {
             if self.0.len() != other.0.len() {
                 return false;
             }
@@ -213,7 +247,7 @@ mod tests {
                 attachments: Some(0),
                 namespace: Some("/nsp"),
                 id: Some(1),
-                data: Some("[\"binary namespaced message with ack\"]"),
+                args: Some("[\"binary namespaced message with ack\"]"),
             }
         );
     }
@@ -238,6 +272,46 @@ mod tests {
             DeserializeResult::Packet(Packet {
                 data: PacketData::Disconnect,
                 namespace: Some("/nsp".into())
+            })
+        );
+    }
+
+    #[test]
+    fn test_deserialize_event() {
+        let m = "23[\"test\",\"hello\",{\"key\":\"value\"}]";
+        let arg_strs = vec!["\"test\"", "\"hello\"", "{\"key\":\"value\"}"];
+        let args = Args(
+            arg_strs
+                .iter()
+                .map(|x| RawValue::from_string(x.to_string()).unwrap())
+                .map(Cow::Owned)
+                .collect(),
+        );
+        assert_eq!(
+            deserialize(EngineMessage::Text(m)).unwrap(),
+            DeserializeResult::Packet(Packet {
+                data: PacketData::Event(Event { id: Some(3), args }),
+                namespace: None,
+            })
+        );
+    }
+
+    #[test]
+    fn test_deserialize_ack() {
+        let m = "33[\"test\",\"hello\",{\"key\":\"value\"}]";
+        let arg_strs = vec!["\"test\"", "\"hello\"", "{\"key\":\"value\"}"];
+        let args = Args(
+            arg_strs
+                .iter()
+                .map(|x| RawValue::from_string(x.to_string()).unwrap())
+                .map(Cow::Owned)
+                .collect(),
+        );
+        assert_eq!(
+            deserialize(EngineMessage::Text(m)).unwrap(),
+            DeserializeResult::Packet(Packet {
+                data: PacketData::Ack(Ack { id: 3, args }),
+                namespace: None,
             })
         );
     }
