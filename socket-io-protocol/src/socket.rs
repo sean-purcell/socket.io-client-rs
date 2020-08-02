@@ -13,7 +13,7 @@ pub struct Packet<'a> {
     pub namespace: Option<Cow<'a, str>>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum PacketKind {
     Connect,
     Disconnect,
@@ -28,29 +28,34 @@ pub enum PacketKind {
 pub enum PacketData<'a> {
     Connect,
     Disconnect,
-    Event(Event<'a>),
-    Ack(Ack<'a>),
-    BinaryEvent(Event<'a>),
-    BinaryAck(Ack<'a>),
-}
-
-#[derive(Debug)]
-#[cfg_attr(test, derive(PartialEq))]
-pub struct Event<'a> {
-    pub id: Option<u64>,
-    pub args: Args<'a>,
-}
-
-#[derive(Debug)]
-#[cfg_attr(test, derive(PartialEq))]
-pub struct Ack<'a> {
-    pub id: u64,
-    pub args: Args<'a>,
+    Event {
+        id: Option<u64>,
+        args: Args<'a>,
+    },
+    Ack {
+        id: u64,
+        args: Args<'a>,
+    },
+    BinaryEvent {
+        id: Option<u64>,
+        args: BinaryArgs<'a>,
+    },
+    BinaryAck {
+        id: u64,
+        args: BinaryArgs<'a>,
+    },
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(transparent)]
 pub struct Args<'a>(#[serde(borrow)] Vec<Cow<'a, RawValue>>);
+
+#[derive(Debug)]
+#[cfg_attr(test, derive(PartialEq))]
+pub struct BinaryArgs<'a> {
+    args: Args<'a>,
+    buffers: Vec<&'a [u8]>,
+}
 
 #[derive(Debug)]
 #[cfg_attr(test, derive(PartialEq))]
@@ -65,8 +70,10 @@ pub enum DeserializeResult<'a> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("Received non-attachment binary message")]
+    #[error("Received non-attachment binary message: {0:?}")]
     NonAttachmentBinary(Vec<u8>),
+    #[error("Received text message as attachment: {0}")]
+    TextAttachment(String),
     #[error("Invalid message: {0}")]
     InvalidMessage(String),
     #[error("Invalid extra data included in {0} packet: {1}")]
@@ -75,9 +82,11 @@ pub enum Error {
     MissingData(&'static str, String),
     #[error("Invalid json in message data: {0}, {1:?}")]
     InvalidDataJson(String, JsonError),
+    #[error("Wrong number of attachments provided: {0} instead of {1}")]
+    InvalidAttachmentCount(u64, u64),
 }
 
-#[derive(Debug)]
+#[derive(Copy, Clone, Debug)]
 #[cfg_attr(test, derive(PartialEq))]
 struct Parse<'a> {
     kind: PacketKind,
@@ -158,12 +167,12 @@ fn deserialize_text<'a>(text: &'a str) -> Result<DeserializeResult<'a>, Error> {
         } else {
             let args = deserialize_args(parse.args.unwrap())?;
             let data = if !ack {
-                PacketData::Event(Event { id: parse.id, args })
+                PacketData::Event { id: parse.id, args }
             } else {
-                PacketData::Ack(Ack {
+                PacketData::Ack {
                     id: parse.id.unwrap(),
                     args,
-                })
+                }
             };
             Ok(DeserializeResult::Packet(Packet {
                 data,
@@ -171,17 +180,73 @@ fn deserialize_text<'a>(text: &'a str) -> Result<DeserializeResult<'a>, Error> {
             }))
         }
     };
+    let binary = |name, ack| {
+        if ack && parse.id.is_none() {
+            Err(Error::MissingData(name, text.to_string()))
+        } else if parse.attachments.is_none() || parse.args.is_none() {
+            Err(Error::MissingData(name, text.to_string()))
+        } else {
+            let attachments = parse.attachments.unwrap();
+            if attachments == 0 {
+                Ok(DeserializeResult::Packet(deserialize_binary(
+                    parse,
+                    Vec::new(),
+                )?))
+            } else {
+                Ok(DeserializeResult::DataNeeded(Partial(parse)))
+            }
+        }
+    };
     match parse.kind {
         PacketKind::Connect => argsless("connect", PacketData::Connect),
         PacketKind::Disconnect => argsless("disconnect", PacketData::Disconnect),
         PacketKind::Event => normal("event", false),
         PacketKind::Ack => normal("ack", true),
-        _ => unimplemented!(),
+        PacketKind::BinaryEvent => binary("binary event", false),
+        PacketKind::BinaryAck => binary("binary ack", true),
     }
 }
 
 fn deserialize_args<'a>(args: &'a str) -> Result<Args<'a>, Error> {
     serde_json::from_str(args).map_err(|err| Error::InvalidDataJson(args.to_string(), err))
+}
+
+pub fn deserialize_partial<'a>(
+    partial: Partial<'a>,
+    buffers: impl IntoIterator<Item = EngineMessage<'a>>,
+) -> Result<Packet<'a>, Error> {
+    let Partial(parse) = partial;
+    let buffers = buffers
+        .into_iter()
+        .map(|x| match x {
+            EngineMessage::Text(text) => Err(Error::TextAttachment(text.to_string())),
+            EngineMessage::Binary(data) => Ok(data),
+        })
+        .collect::<Result<_, _>>()?;
+    deserialize_binary(parse, buffers)
+}
+
+fn deserialize_binary<'a>(parse: Parse<'a>, buffers: Vec<&'a [u8]>) -> Result<Packet<'a>, Error> {
+    let actual = buffers.len() as u64;
+    let expected = parse.attachments.unwrap();
+    if actual != expected {
+        Err(Error::InvalidAttachmentCount(actual, expected))
+    } else {
+        let args = deserialize_args(parse.args.unwrap())?;
+        let args = BinaryArgs { args, buffers };
+        let data = match parse.kind {
+            PacketKind::BinaryEvent => PacketData::BinaryEvent { id: parse.id, args },
+            PacketKind::BinaryAck => PacketData::BinaryAck {
+                id: parse.id.unwrap(),
+                args,
+            },
+            _ => unreachable!(),
+        };
+        Ok(Packet {
+            data,
+            namespace: parse.namespace.map(|x| x.into()),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -290,7 +355,7 @@ mod tests {
         assert_eq!(
             deserialize(EngineMessage::Text(m)).unwrap(),
             DeserializeResult::Packet(Packet {
-                data: PacketData::Event(Event { id: Some(3), args }),
+                data: PacketData::Event { id: Some(3), args },
                 namespace: None,
             })
         );
@@ -310,9 +375,77 @@ mod tests {
         assert_eq!(
             deserialize(EngineMessage::Text(m)).unwrap(),
             DeserializeResult::Packet(Packet {
-                data: PacketData::Ack(Ack { id: 3, args }),
+                data: PacketData::Ack { id: 3, args },
                 namespace: None,
             })
+        );
+    }
+
+    #[test]
+    fn test_deserialize_binary_event() {
+        let m = "51-[\"binary\",{\"_placeholder\":true,\"num\":0}]";
+        let attachment = vec![222, 173, 190, 239];
+        let attachments = vec![EngineMessage::Binary(&*attachment)];
+        let arg_strs = vec!["\"binary\"", "{\"_placeholder\":true,\"num\":0}"];
+
+        let partial = match deserialize(EngineMessage::Text(m)).unwrap() {
+            DeserializeResult::DataNeeded(partial) => partial,
+            _ => unreachable!(),
+        };
+
+        let packet = deserialize_partial(partial, attachments).unwrap();
+
+        let args = Args(
+            arg_strs
+                .iter()
+                .map(|x| RawValue::from_string(x.to_string()).unwrap())
+                .map(Cow::Owned)
+                .collect(),
+        );
+        let buffers = vec![&*attachment];
+        assert_eq!(
+            packet,
+            Packet {
+                data: PacketData::BinaryEvent {
+                    id: None,
+                    args: BinaryArgs { args, buffers },
+                },
+                namespace: None
+            }
+        );
+    }
+
+    #[test]
+    fn test_deserialize_binary_ack() {
+        let m = "61-10[\"binary\",{\"_placeholder\":true,\"num\":0}]";
+        let attachment = vec![222, 173, 190, 239];
+        let attachments = vec![EngineMessage::Binary(&*attachment)];
+        let arg_strs = vec!["\"binary\"", "{\"_placeholder\":true,\"num\":0}"];
+
+        let partial = match deserialize(EngineMessage::Text(m)).unwrap() {
+            DeserializeResult::DataNeeded(partial) => partial,
+            _ => unreachable!(),
+        };
+
+        let packet = deserialize_partial(partial, attachments).unwrap();
+
+        let args = Args(
+            arg_strs
+                .iter()
+                .map(|x| RawValue::from_string(x.to_string()).unwrap())
+                .map(Cow::Owned)
+                .collect(),
+        );
+        let buffers = vec![&*attachment];
+        assert_eq!(
+            packet,
+            Packet {
+                data: PacketData::BinaryAck {
+                    id: 10,
+                    args: BinaryArgs { args, buffers },
+                },
+                namespace: None
+            }
         );
     }
 }
