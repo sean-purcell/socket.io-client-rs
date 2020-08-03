@@ -1,3 +1,4 @@
+use std::error::Error as StdError;
 use std::fmt;
 
 use paste::paste;
@@ -13,8 +14,6 @@ use super::BinaryArg;
 pub enum Error {
     #[error("{0}")]
     Message(String),
-    #[error("Error deserializing json: {0}")]
-    JsonError(#[from] JsonError),
 }
 
 impl DeError for Error {
@@ -40,8 +39,11 @@ where
 
 type Buffers<'a> = &'a [&'a [u8]];
 
-struct BinaryDeserializer<'de, 'a> {
-    d: &'a mut JsonDeserializer<StrRead<'de>>,
+struct BinaryDeserializer<'de, D>
+where
+    D: Deserializer<'de>,
+{
+    d: D,
     buffers: Buffers<'de>,
 }
 
@@ -64,14 +66,17 @@ macro_rules! deserialize_forward {
                     Ok(self.d.[<deserialize_ $fn>](
                             $( $arg , )*
                             BinaryVisitor { visitor, buffers: self.buffers }
-                        )?)
+                        ).map_err(|e| Error::Message(e.to_string()))?)
                 }
             }
         )*
     };
 }
 
-impl<'de, 'a> Deserializer<'de> for BinaryDeserializer<'de, 'a> {
+impl<'de, D> Deserializer<'de> for BinaryDeserializer<'de, D>
+where
+    D: Deserializer<'de>,
+{
     type Error = Error;
 
     deserialize_forward! {
@@ -131,13 +136,36 @@ mod tests {
 
     use serde_json::value::RawValue;
 
+    #[derive(Debug, Deserialize)]
+    struct BinaryNoTranslate {
+        array: Placeholder,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct Placeholder {
+        _placeholder: bool,
+        num: u64,
+    }
+
+    #[test]
+    fn test_translate() {
+        let attachment = [222, 173, 190, 239];
+        let attachments = [&attachment[..]];
+        let json = Cow::Owned(
+            RawValue::from_string("{\"array\": {\"_placeholder\":true,\"num\":0}}".to_string())
+                .unwrap(),
+        );
+        let arg = BinaryArg(&json, &attachments[..]);
+        let _ = deserialize::<BinaryNoTranslate>(&arg).expect_err("Deserialization succeeded");
+    }
+
     #[derive(Deserialize)]
     struct BinaryBorrowed<'a> {
         array: &'a [u8],
     }
 
     #[test]
-    fn test_simple() {
+    fn test_borrowed() {
         let attachment = [222, 173, 190, 239];
         let attachments = [&attachment[..]];
         let json = Cow::Owned(
@@ -147,5 +175,23 @@ mod tests {
         let arg = BinaryArg(&json, &attachments[..]);
         let res: BinaryBorrowed = deserialize(&arg).unwrap();
         assert_eq!(res.array, &attachment[..]);
+    }
+
+    #[derive(Deserialize)]
+    struct BinaryOwned {
+        array: Vec<u8>,
+    }
+
+    #[test]
+    fn test_owned() {
+        let attachment = [222, 173, 190, 239];
+        let attachments = [&attachment[..]];
+        let json = Cow::Owned(
+            RawValue::from_string("{\"array\": {\"_placeholder\":true,\"num\":0}}".to_string())
+                .unwrap(),
+        );
+        let arg = BinaryArg(&json, &attachments[..]);
+        let res: BinaryOwned = deserialize(&arg).unwrap();
+        assert_eq!(res.array, attachment[..].to_vec());
     }
 }
