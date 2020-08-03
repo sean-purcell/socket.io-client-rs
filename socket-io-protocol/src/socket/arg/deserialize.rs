@@ -1,11 +1,11 @@
-use std::fmt::Display;
+use std::fmt;
 
 use paste::paste;
 use serde::{
     de::{Error as DeError, Visitor},
     Deserialize, Deserializer,
 };
-use serde_json::{de::StrRead, Deserializer as JsonDeserializer};
+use serde_json::{de::StrRead, Deserializer as JsonDeserializer, Error as JsonError};
 
 use super::BinaryArg;
 
@@ -13,114 +13,113 @@ use super::BinaryArg;
 pub enum Error {
     #[error("{0}")]
     Message(String),
+    #[error("Error deserializing json: {0}")]
+    JsonError(#[from] JsonError),
 }
 
 impl DeError for Error {
     fn custom<T>(msg: T) -> Self
     where
-        T: Display,
+        T: fmt::Display,
     {
         Error::Message(msg.to_string())
     }
-}
-
-struct BinaryDeserializer<'de> {
-    d: JsonDeserializer<StrRead<'de>>,
-    buffers: &'de [&'de [u8]],
 }
 
 pub fn deserialize<'a, T>(arg: &BinaryArg<'a>) -> Result<T, Error>
 where
     T: Deserialize<'a>,
 {
-    let mut deserializer = BinaryDeserializer {
-        d: JsonDeserializer::from_str(arg.0.get()),
+    let mut d = JsonDeserializer::from_str(arg.0.get());
+    let deserializer = BinaryDeserializer {
+        d: &mut d,
         buffers: arg.1,
     };
-    T::deserialize(&mut deserializer)
+    T::deserialize(deserializer)
 }
 
-macro_rules! deserialize_unimplemented {
-    ($($f:ident)*) => {
+type Buffers<'a> = &'a [&'a [u8]];
+
+struct BinaryDeserializer<'de, 'a> {
+    d: &'a mut JsonDeserializer<StrRead<'de>>,
+    buffers: Buffers<'de>,
+}
+
+struct BinaryVisitor<'de, V>
+where
+    V: Visitor<'de>,
+{
+    visitor: V,
+    buffers: Buffers<'de>,
+}
+
+macro_rules! deserialize_forward {
+    ($($fn:ident ( $( $arg:ident : $ty:ty),* ) , )*) => {
         $(
-            paste! {
-                fn [<deserialize_ $f>]<V>(self, _visitor: V) -> Result<V::Value, Error>
+            paste!{
+                fn [<deserialize_ $fn>]<V>(self, $( $arg: $ty , )* visitor: V) -> Result<V::Value, Error>
                 where
-                    V: Visitor<'de>,
+                    V: Visitor<'de>
                 {
-                    unimplemented!()
+                    Ok(self.d.[<deserialize_ $fn>](
+                            $( $arg , )*
+                            BinaryVisitor { visitor, buffers: self.buffers }
+                        )?)
                 }
             }
         )*
     };
 }
 
-impl<'de, 'a> Deserializer<'de> for &'a mut BinaryDeserializer<'de> {
+impl<'de, 'a> Deserializer<'de> for BinaryDeserializer<'de, 'a> {
     type Error = Error;
 
-    deserialize_unimplemented!(any bool byte_buf bytes char f32 f64 i16 i32 i64 i8 identifier
-        ignored_any map  option seq str string u16 u32 u64
-        u8 unit i128 u128);
-
-    fn deserialize_unit_struct<V>(self, _name: &'static str, _visitor: V) -> Result<V::Value, Error>
-    where
-        V: Visitor<'de>,
-    {
-        unimplemented!()
+    deserialize_forward! {
+        any(),
+        bool(),
+        i8(),
+        i16(),
+        i32(),
+        i64(),
+        u8(),
+        u16(),
+        u32(),
+        u64(),
+        f32(),
+        f64(),
+        char(),
+        str(),
+        string(),
+        bytes(),
+        byte_buf(),
+        option(),
+        unit(),
+        unit_struct(name: &'static str),
+        newtype_struct(name: &'static str),
+        seq(),
+        tuple(len: usize),
+        tuple_struct(name: &'static str, len: usize),
+        map(),
+        struct(name: &'static str, fields: &'static [&'static str]),
+        enum(name: &'static str, variants: &'static [&'static str]),
+        identifier(),
+        ignored_any(),
+        i128(),
+        u128(),
     }
 
-    fn deserialize_newtype_struct<V>(
-        self,
-        _name: &'static str,
-        _visitor: V,
-    ) -> Result<V::Value, Error>
-    where
-        V: Visitor<'de>,
-    {
-        unimplemented!()
+    fn is_human_readable(&self) -> bool {
+        self.d.is_human_readable()
     }
+}
 
-    fn deserialize_tuple<V>(self, _len: usize, _visitor: V) -> Result<V::Value, Error>
-    where
-        V: Visitor<'de>,
-    {
-        unimplemented!()
-    }
-
-    fn deserialize_tuple_struct<V>(
-        self,
-        _name: &'static str,
-        _len: usize,
-        _visitor: V,
-    ) -> Result<V::Value, Error>
-    where
-        V: Visitor<'de>,
-    {
-        unimplemented!()
-    }
-
-    fn deserialize_struct<V>(
-        self,
-        _name: &'static str,
-        _fields: &'static [&'static str],
-        _visitor: V,
-    ) -> Result<V::Value, Error>
-    where
-        V: Visitor<'de>,
-    {
-        unimplemented!()
-    }
-
-    fn deserialize_enum<V>(
-        self,
-        _name: &'static str,
-        _variants: &'static [&'static str],
-        _visitor: V,
-    ) -> Result<V::Value, Error>
-    where
-        V: Visitor<'de>,
-    {
-        unimplemented!()
+impl<'de, V> Visitor<'de> for BinaryVisitor<'de, V>
+where
+    V: Visitor<'de>,
+{
+    type Value = V::Value;
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        self.visitor.expecting(formatter)
     }
 }
 
@@ -146,6 +145,7 @@ mod tests {
                 .unwrap(),
         );
         let arg = BinaryArg(&json, &attachments[..]);
-        let _: BinaryBorrowed = deserialize(&arg).unwrap();
+        let res: BinaryBorrowed = deserialize(&arg).unwrap();
+        assert_eq!(res.array, &attachment[..]);
     }
 }
