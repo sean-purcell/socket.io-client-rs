@@ -1,4 +1,3 @@
-use std::error::Error as StdError;
 use std::fmt;
 
 use paste::paste;
@@ -6,22 +5,20 @@ use serde::{
     de::{EnumAccess, Error as DeError, MapAccess, SeqAccess, Visitor},
     Deserialize, Deserializer,
 };
-use serde_json::{de::StrRead, Deserializer as JsonDeserializer, Error as JsonError};
+use serde_json::Deserializer as JsonDeserializer;
 
 use super::BinaryArg;
 
 #[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("{0}")]
-    Message(String),
-}
+#[error("{0}")]
+pub struct Error(String);
 
 impl DeError for Error {
     fn custom<T>(msg: T) -> Self
     where
         T: fmt::Display,
     {
-        Error::Message(msg.to_string())
+        Error(msg.to_string())
     }
 }
 
@@ -66,7 +63,7 @@ macro_rules! deserialize_forward {
                     Ok(self.d.[<deserialize_ $fn>](
                             $( $arg , )*
                             BinaryVisitor { visitor, buffers: self.buffers }
-                        ).map_err(|e| Error::Message(e.to_string()))?)
+                        ).map_err(|e| Error(e.to_string()))?)
                 }
             }
         )*
@@ -167,20 +164,30 @@ where
         unit(),
     }
 
-    fn visit_some<D>(self, deserializer: D) -> Result<V::Value, D::Error>
+    fn visit_some<D>(self, d: D) -> Result<V::Value, D::Error>
     where
         D: Deserializer<'de>,
     {
-        // FIXME: Need to transform deserializer
-        self.visitor.visit_some(deserializer)
+        let wrapped = BinaryDeserializer {
+            d,
+            buffers: self.buffers,
+        };
+        self.visitor
+            .visit_some(wrapped)
+            .map_err(|e| D::Error::custom(e.0))
     }
 
-    fn visit_newtype_struct<D>(self, deserializer: D) -> Result<V::Value, D::Error>
+    fn visit_newtype_struct<D>(self, d: D) -> Result<V::Value, D::Error>
     where
         D: Deserializer<'de>,
     {
-        // FIXME: Need to transform deserializer
-        self.visitor.visit_newtype_struct(deserializer)
+        let wrapped = BinaryDeserializer {
+            d,
+            buffers: self.buffers,
+        };
+        self.visitor
+            .visit_newtype_struct(wrapped)
+            .map_err(|e| D::Error::custom(e.0))
     }
 
     fn visit_seq<A>(self, seq: A) -> Result<V::Value, A::Error>
