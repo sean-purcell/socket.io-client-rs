@@ -3,7 +3,7 @@ use std::fmt;
 
 use paste::paste;
 use serde::{
-    de::{Error as DeError, Visitor},
+    de::{EnumAccess, Error as DeError, MapAccess, SeqAccess, Visitor},
     Deserialize, Deserializer,
 };
 use serde_json::{de::StrRead, Deserializer as JsonDeserializer, Error as JsonError};
@@ -118,13 +118,93 @@ where
     }
 }
 
+macro_rules! visit_forward {
+    ($($fn:ident ( $( $arg:ident : $ty:ty),* ) , )*) => {
+        $(
+            paste!{
+                fn [<visit_ $fn>]<E>(self, $( $arg: $ty , )*) -> Result<V::Value, E>
+                where
+                    E: DeError,
+                {
+                    self.visitor.[<visit_ $fn>]($($arg)*)
+                }
+            }
+        )*
+    };
+}
+
 impl<'de, V> Visitor<'de> for BinaryVisitor<'de, V>
 where
     V: Visitor<'de>,
 {
     type Value = V::Value;
+
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
         self.visitor.expecting(formatter)
+    }
+
+    visit_forward! {
+        bool(v: bool),
+        i8(v: i8),
+        i16(v: i16),
+        i32(v: i32),
+        i64(v: i64),
+        i128(v: i128),
+        u16(v: u16),
+        u32(v: u32),
+        u64(v: u64),
+        u128(v: u128),
+        f32(v: f32),
+        f64(v: f64),
+        char(v: char),
+        str(v: &str),
+        borrowed_str(v: &'de str),
+        string(v: String),
+        bytes(v: &[u8]),
+        borrowed_bytes(v: &'de [u8]),
+        byte_buf(v: Vec<u8>),
+        none(),
+        unit(),
+    }
+
+    fn visit_some<D>(self, deserializer: D) -> Result<V::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // FIXME: Need to transform deserializer
+        self.visitor.visit_some(deserializer)
+    }
+
+    fn visit_newtype_struct<D>(self, deserializer: D) -> Result<V::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // FIXME: Need to transform deserializer
+        self.visitor.visit_newtype_struct(deserializer)
+    }
+
+    fn visit_seq<A>(self, seq: A) -> Result<V::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        // FIXME: Need to transform deserializer
+        self.visitor.visit_seq(seq)
+    }
+
+    fn visit_map<A>(self, map: A) -> Result<V::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        // FIXME: Need to transform deserializer
+        self.visitor.visit_map(map)
+    }
+
+    fn visit_enum<A>(self, data: A) -> Result<V::Value, A::Error>
+    where
+        A: EnumAccess<'de>,
+    {
+        // FIXME: Need to transform deserializer
+        self.visitor.visit_enum(data)
     }
 }
 
