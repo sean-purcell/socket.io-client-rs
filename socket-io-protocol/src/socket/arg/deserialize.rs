@@ -56,7 +56,7 @@ struct BinarySeqAccess<'de, S>
 where
     S: SeqAccess<'de>,
 {
-    seq_access: S,
+    seq: S,
     buffers: Buffers<'de>,
 }
 
@@ -198,8 +198,11 @@ where
     where
         A: SeqAccess<'de>,
     {
-        // FIXME: Need to transform deserializer
-        self.visitor.visit_seq(seq)
+        let wrapped = BinarySeqAccess {
+            seq,
+            buffers: self.buffers,
+        };
+        self.visitor.visit_seq(wrapped)
     }
 
     fn visit_map<A>(self, map: A) -> Result<V::Value, A::Error>
@@ -255,7 +258,7 @@ where
             }
         }
 
-        self.seq_access.next_element_seed(Seed {
+        self.seq.next_element_seed(Seed {
             buffers: self.buffers,
             seed,
         })
