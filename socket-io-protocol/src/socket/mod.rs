@@ -6,6 +6,8 @@ use serde_json::{value::RawValue, Error as JsonError};
 
 use super::engine::Message as EngineMessage;
 
+mod arg;
+
 #[derive(Debug)]
 #[cfg_attr(test, derive(PartialEq))]
 pub struct Packet<'a> {
@@ -53,8 +55,8 @@ pub struct Args<'a>(#[serde(borrow)] Vec<Cow<'a, RawValue>>);
 #[derive(Debug)]
 #[cfg_attr(test, derive(PartialEq))]
 pub struct BinaryArgs<'a> {
-    args: Args<'a>,
-    buffers: Vec<&'a [u8]>,
+    pub args: Args<'a>,
+    pub buffers: Vec<&'a [u8]>,
 }
 
 #[derive(Debug)]
@@ -246,6 +248,21 @@ fn deserialize_binary<'a>(parse: Parse<'a>, buffers: Vec<&'a [u8]>) -> Result<Pa
             data,
             namespace: parse.namespace.map(|x| x.into()),
         })
+    }
+}
+
+impl<'a> DeserializeResult<'a> {
+    pub fn packet(self) -> Option<Packet<'a>> {
+        match self {
+            DeserializeResult::Packet(packet) => Some(packet),
+            DeserializeResult::DataNeeded(_) => None,
+        }
+    }
+}
+
+impl<'a> Partial<'a> {
+    pub fn attachments(&self) -> u64 {
+        self.0.attachments.unwrap()
     }
 }
 
