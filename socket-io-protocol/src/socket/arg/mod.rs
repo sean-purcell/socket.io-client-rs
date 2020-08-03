@@ -86,7 +86,8 @@ impl<'a> Arg<'a> for BinaryArg<'a> {
     where
         T: Deserialize<'a>,
     {
-        Ok(deserialize::deserialize(self)?)
+        deserialize::deserialize(self)
+            .map_err(|err| Error::JsonError(format!("({:?}, {:?})", self.0.get(), self.1), err))
     }
 }
 

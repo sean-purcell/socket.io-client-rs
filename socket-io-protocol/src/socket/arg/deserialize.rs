@@ -2,10 +2,10 @@ use std::fmt;
 
 use paste::paste;
 use serde::{
-    de::{EnumAccess, Error as DeError, MapAccess, SeqAccess, Visitor},
+    de::{DeserializeSeed, EnumAccess, Error as DeError, MapAccess, SeqAccess, Visitor},
     Deserialize, Deserializer,
 };
-use serde_json::Deserializer as JsonDeserializer;
+use serde_json::{Deserializer as JsonDeserializer, Error as JsonError};
 
 use super::BinaryArg;
 
@@ -22,7 +22,7 @@ impl DeError for Error {
     }
 }
 
-pub fn deserialize<'a, T>(arg: &BinaryArg<'a>) -> Result<T, Error>
+pub fn deserialize<'a, T>(arg: &BinaryArg<'a>) -> Result<T, JsonError>
 where
     T: Deserialize<'a>,
 {
@@ -52,18 +52,26 @@ where
     buffers: Buffers<'de>,
 }
 
+struct BinarySeqAccess<'de, S>
+where
+    S: SeqAccess<'de>,
+{
+    seq_access: S,
+    buffers: Buffers<'de>,
+}
+
 macro_rules! deserialize_forward {
     ($($fn:ident ( $( $arg:ident : $ty:ty),* ) , )*) => {
         $(
             paste!{
-                fn [<deserialize_ $fn>]<V>(self, $( $arg: $ty , )* visitor: V) -> Result<V::Value, Error>
+                fn [<deserialize_ $fn>]<V>(self, $( $arg: $ty , )* visitor: V) -> Result<V::Value, D::Error>
                 where
                     V: Visitor<'de>
                 {
-                    Ok(self.d.[<deserialize_ $fn>](
+                    self.d.[<deserialize_ $fn>](
                             $( $arg , )*
                             BinaryVisitor { visitor, buffers: self.buffers }
-                        ).map_err(|e| Error(e.to_string()))?)
+                        )
                 }
             }
         )*
@@ -74,7 +82,7 @@ impl<'de, D> Deserializer<'de> for BinaryDeserializer<'de, D>
 where
     D: Deserializer<'de>,
 {
-    type Error = Error;
+    type Error = D::Error;
 
     deserialize_forward! {
         any(),
@@ -172,9 +180,7 @@ where
             d,
             buffers: self.buffers,
         };
-        self.visitor
-            .visit_some(wrapped)
-            .map_err(|e| D::Error::custom(e.0))
+        self.visitor.visit_some(wrapped)
     }
 
     fn visit_newtype_struct<D>(self, d: D) -> Result<V::Value, D::Error>
@@ -185,9 +191,7 @@ where
             d,
             buffers: self.buffers,
         };
-        self.visitor
-            .visit_newtype_struct(wrapped)
-            .map_err(|e| D::Error::custom(e.0))
+        self.visitor.visit_newtype_struct(wrapped)
     }
 
     fn visit_seq<A>(self, seq: A) -> Result<V::Value, A::Error>
@@ -212,6 +216,49 @@ where
     {
         // FIXME: Need to transform deserializer
         self.visitor.visit_enum(data)
+    }
+}
+
+impl<'de, S> SeqAccess<'de> for BinarySeqAccess<'de, S>
+where
+    S: SeqAccess<'de>,
+{
+    type Error = S::Error;
+
+    fn next_element_seed<T>(&mut self, seed: T) -> Result<Option<T::Value>, Self::Error>
+    where
+        T: DeserializeSeed<'de>,
+    {
+        struct Seed<'a, T>
+        where
+            T: DeserializeSeed<'a>,
+        {
+            buffers: Buffers<'a>,
+            seed: T,
+        };
+
+        impl<'b, T> DeserializeSeed<'b> for Seed<'b, T>
+        where
+            T: DeserializeSeed<'b>,
+        {
+            type Value = T::Value;
+
+            fn deserialize<D>(self, d: D) -> Result<T::Value, D::Error>
+            where
+                D: Deserializer<'b>,
+            {
+                let wrapper = BinaryDeserializer {
+                    d,
+                    buffers: self.buffers,
+                };
+                self.seed.deserialize(wrapper)
+            }
+        }
+
+        self.seq_access.next_element_seed(Seed {
+            buffers: self.buffers,
+            seed,
+        })
     }
 }
 
@@ -276,6 +323,18 @@ mod tests {
         let json = Cow::Owned(
             RawValue::from_string("{\"array\": {\"_placeholder\":true,\"num\":0}}".to_string())
                 .unwrap(),
+        );
+        let arg = BinaryArg(&json, &attachments[..]);
+        let res: BinaryOwned = deserialize(&arg).unwrap();
+        assert_eq!(res.array, attachment[..].to_vec());
+    }
+
+    #[test]
+    fn test_passthrough() {
+        let attachment = [222, 173, 190, 239];
+        let attachments = [];
+        let json = Cow::Owned(
+            RawValue::from_string("{\"array\": [222, 173, 190, 239]}".to_string()).unwrap(),
         );
         let arg = BinaryArg(&json, &attachments[..]);
         let res: BinaryOwned = deserialize(&arg).unwrap();
