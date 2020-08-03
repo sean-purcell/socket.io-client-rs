@@ -3,14 +3,20 @@ use serde_json::{value::Value, Error as JsonError};
 
 use super::*;
 
+mod deserialize;
+
+use deserialize::Error as DeserializeError;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("Placeholder object is missing num field: {0:?}")]
     NoNumInPlaceholderObject(Value),
     #[error("Placeholder index out of range: {0}/{1}")]
     PlaceholderIndexOutOfRange(u64, u64),
-    #[error("Error deserializing json: {0}, {1:?}")]
+    #[error("Error deserializing json: {0}, {1}")]
     JsonError(String, JsonError),
+    #[error("Error deserializing binary arguments: {0}")]
+    BinaryError(#[from] DeserializeError),
 }
 
 pub trait Arg<'a> {
@@ -80,7 +86,7 @@ impl<'a> Arg<'a> for BinaryArg<'a> {
     where
         T: Deserialize<'a>,
     {
-        unimplemented!()
+        Ok(deserialize::deserialize(self)?)
     }
 }
 
@@ -195,6 +201,12 @@ mod tests {
                 key: "value".to_string()
             }
         );
+    }
+
+    #[derive(Deserialize)]
+    #[allow(dead_code)]
+    struct BinaryBorrowed<'a> {
+        array: &'a [u8],
     }
 
     #[test]
