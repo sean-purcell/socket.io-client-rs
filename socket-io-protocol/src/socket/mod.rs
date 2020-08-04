@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{value::RawValue, Error as JsonError};
 
 use super::engine::Message as EngineMessage;
@@ -48,9 +48,8 @@ pub enum PacketData<'a> {
     },
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(transparent)]
-pub struct Args<'a>(#[serde(borrow)] Vec<Cow<'a, RawValue>>);
+#[derive(Debug)]
+pub struct Args<'a>(Vec<Cow<'a, RawValue>>);
 
 #[derive(Debug)]
 #[cfg_attr(test, derive(PartialEq))]
@@ -266,6 +265,16 @@ impl<'a> Partial<'a> {
     }
 }
 
+impl<'de> Deserialize<'de> for Args<'de> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let borroweds = <Vec<&'de RawValue> as Deserialize>::deserialize(deserializer)?;
+        Ok(Args(borroweds.into_iter().map(Cow::Borrowed).collect()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -464,5 +473,29 @@ mod tests {
                 namespace: None
             }
         );
+    }
+
+    #[test]
+    fn test_deserialize_zero_copy() {
+        let m = "33[\"test\",\"hello\",{\"key\":\"value\"}]";
+        let args = match deserialize(EngineMessage::Text(m))
+            .unwrap()
+            .packet()
+            .unwrap()
+            .data
+        {
+            PacketData::Ack { args, .. } => args,
+            _ => unreachable!(),
+        };
+
+        for arg in args.0 {
+            match arg {
+                Cow::Borrowed(_) => (),
+                Cow::Owned(_) => panic!(
+                    "Data was copied when it could have been borrowed: {:?}",
+                    arg
+                ),
+            }
+        }
     }
 }
