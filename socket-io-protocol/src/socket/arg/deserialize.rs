@@ -3,11 +3,12 @@ use std::fmt;
 use paste::paste;
 use serde::{
     de::{
-        DeserializeSeed, EnumAccess, Error as DeError, MapAccess, SeqAccess, VariantAccess, Visitor,
+        value::BorrowedStrDeserializer, DeserializeSeed, EnumAccess, Error as DeError, MapAccess,
+        SeqAccess, VariantAccess, Visitor,
     },
     Deserialize, Deserializer,
 };
-use serde_json::{Deserializer as JsonDeserializer, Error as JsonError};
+use serde_json::{value::RawValue, Deserializer as JsonDeserializer, Error as JsonError};
 
 use super::BinaryArg;
 
@@ -86,6 +87,16 @@ where
     buffers: Buffers<'a>,
 }
 
+struct BinaryMapAccess<'a, M>
+where
+    M: MapAccess<'a>,
+{
+    map: M,
+    buffers: Buffers<'a>,
+    entry0: Option<Option<(&'a str, &'a RawValue)>>,
+    entry1: Option<Option<(&'a str, &'a RawValue)>>,
+}
+
 macro_rules! deserialize_forward {
     ($($fn:ident ( $( $arg:ident : $ty:ty),* ) , )*) => {
         $(
@@ -98,6 +109,21 @@ macro_rules! deserialize_forward {
                             $( $arg , )*
                             BinaryVisitor { visitor, buffers: self.buffers }
                         )
+                }
+            }
+        )*
+    };
+}
+
+macro_rules! deserialize_forward_any {
+    ($($fn:ident ( $( $arg:ident : $ty:ty),* ) , )*) => {
+        $(
+            paste!{
+                fn [<deserialize_ $fn>]<V>(self, $( $arg: $ty , )* visitor: V) -> Result<V::Value, D::Error>
+                where
+                    V: Visitor<'de>
+                {
+                    self.d.deserialize_any(BinaryVisitor { visitor, buffers: self.buffers })
                 }
             }
         )*
@@ -124,10 +150,6 @@ where
         f32(),
         f64(),
         char(),
-        str(),
-        string(),
-        bytes(),
-        byte_buf(),
         option(),
         unit(),
         unit_struct(name: &'static str),
@@ -142,6 +164,13 @@ where
         ignored_any(),
         i128(),
         u128(),
+    }
+
+    deserialize_forward_any! {
+        str(),
+        string(),
+        bytes(),
+        byte_buf(),
     }
 
     fn is_human_readable(&self) -> bool {
@@ -231,20 +260,52 @@ where
         self.visitor.visit_seq(wrapped)
     }
 
-    fn visit_map<A>(self, map: A) -> Result<V::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        // FIXME: Need to transform deserializer
-        self.visitor.visit_map(map)
-    }
-
     fn visit_enum<A>(self, data: A) -> Result<V::Value, A::Error>
     where
         A: EnumAccess<'de>,
     {
-        // FIXME: Need to transform deserializer
-        self.visitor.visit_enum(data)
+        let wrapped = BinaryEnumAccess {
+            data,
+            buffers: self.buffers,
+        };
+        self.visitor.visit_enum(wrapped)
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<V::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let entry0: Option<(&'de str, &'de RawValue)> = map.next_entry()?;
+        let entry1: Option<(&'de str, &'de RawValue)> = if entry0.is_some() {
+            map.next_entry()?
+        } else {
+            None
+        };
+        match (entry0, entry1) {
+            (Some(("_placeholder", _)), Some(("num", num)))
+            | (Some(("num", num)), Some(("_placeholder", _))) => {
+                let mut deserializer = JsonDeserializer::from_str(num.get());
+                let num =
+                    u64::deserialize(&mut deserializer).map_err(|err| A::Error::custom(err))?;
+                let buffer = self.buffers.get(num as usize).ok_or_else(|| {
+                    A::Error::custom(format!(
+                        "Placeholder num out of range: {}/{}",
+                        num,
+                        self.buffers.len()
+                    ))
+                })?;
+                self.visitor.visit_borrowed_bytes(buffer)
+            }
+            (entry0, entry1) => {
+                let map = BinaryMapAccess {
+                    map,
+                    buffers: self.buffers,
+                    entry0: Some(entry0),
+                    entry1: Some(entry1),
+                };
+                self.visitor.visit_map(map)
+            }
+        }
     }
 }
 
@@ -335,6 +396,57 @@ where
                 buffers: self.buffers,
             },
         )
+    }
+}
+
+impl<'de, M> MapAccess<'de> for BinaryMapAccess<'de, M>
+where
+    M: MapAccess<'de>,
+{
+    type Error = M::Error;
+
+    fn next_key_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>, M::Error>
+    where
+        K: DeserializeSeed<'de>,
+    {
+        match (self.entry0, self.entry1, &mut self.map) {
+            (Some(entry), _, _) | (None, Some(entry), _) => {
+                let key = entry.map(|(key, _)| key);
+                if let Some(k) = key {
+                    let deserializer = BorrowedStrDeserializer::new(k);
+                    seed.deserialize(deserializer).map(Some)
+                } else {
+                    Ok(None)
+                }
+            }
+            (None, None, map) => {
+                // TODO(me@seanp.xyz): This isn't passing the buffers along because the keys should
+                // just be strings, but it's possible this assumption is wrong.
+                map.next_key_seed(seed)
+            }
+        }
+    }
+
+    fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value, M::Error>
+    where
+        V: DeserializeSeed<'de>,
+    {
+        if let Some(entry) = self.entry0.take() {
+            let value = entry.unwrap().1;
+            let mut deserializer = JsonDeserializer::from_str(value.get());
+            seed.deserialize(&mut deserializer)
+                .map_err(|err| M::Error::custom(err))
+        } else if let Some(entry) = self.entry1.take() {
+            let value = entry.unwrap().1;
+            let mut deserializer = JsonDeserializer::from_str(value.get());
+            seed.deserialize(&mut deserializer)
+                .map_err(|err| M::Error::custom(err))
+        } else {
+            self.map.next_value_seed(BinarySeed {
+                seed,
+                buffers: self.buffers,
+            })
+        }
     }
 }
 
