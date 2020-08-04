@@ -2,7 +2,9 @@ use std::fmt;
 
 use paste::paste;
 use serde::{
-    de::{DeserializeSeed, EnumAccess, Error as DeError, MapAccess, SeqAccess, Visitor},
+    de::{
+        DeserializeSeed, EnumAccess, Error as DeError, MapAccess, SeqAccess, VariantAccess, Visitor,
+    },
     Deserialize, Deserializer,
 };
 use serde_json::{Deserializer as JsonDeserializer, Error as JsonError};
@@ -58,6 +60,30 @@ where
 {
     seq: S,
     buffers: Buffers<'de>,
+}
+
+struct BinaryEnumAccess<'de, E>
+where
+    E: EnumAccess<'de>,
+{
+    data: E,
+    buffers: Buffers<'de>,
+}
+
+struct BinaryVariantAccess<'de, V>
+where
+    V: VariantAccess<'de>,
+{
+    variant: V,
+    buffers: Buffers<'de>,
+}
+
+struct BinarySeed<'a, T>
+where
+    T: DeserializeSeed<'a>,
+{
+    seed: T,
+    buffers: Buffers<'a>,
 }
 
 macro_rules! deserialize_forward {
@@ -232,36 +258,101 @@ where
     where
         T: DeserializeSeed<'de>,
     {
-        struct Seed<'a, T>
-        where
-            T: DeserializeSeed<'a>,
-        {
-            buffers: Buffers<'a>,
-            seed: T,
-        };
-
-        impl<'b, T> DeserializeSeed<'b> for Seed<'b, T>
-        where
-            T: DeserializeSeed<'b>,
-        {
-            type Value = T::Value;
-
-            fn deserialize<D>(self, d: D) -> Result<T::Value, D::Error>
-            where
-                D: Deserializer<'b>,
-            {
-                let wrapper = BinaryDeserializer {
-                    d,
-                    buffers: self.buffers,
-                };
-                self.seed.deserialize(wrapper)
-            }
-        }
-
-        self.seq.next_element_seed(Seed {
-            buffers: self.buffers,
+        self.seq.next_element_seed(BinarySeed {
             seed,
+            buffers: self.buffers,
         })
+    }
+}
+
+impl<'de, E> EnumAccess<'de> for BinaryEnumAccess<'de, E>
+where
+    E: EnumAccess<'de>,
+{
+    type Error = E::Error;
+    type Variant = BinaryVariantAccess<'de, E::Variant>;
+
+    fn variant_seed<V>(self, seed: V) -> Result<(V::Value, Self::Variant), E::Error>
+    where
+        V: DeserializeSeed<'de>,
+    {
+        let (value, variant) = self.data.variant_seed(seed)?;
+        Ok((
+            value,
+            BinaryVariantAccess {
+                variant,
+                buffers: self.buffers,
+            },
+        ))
+    }
+}
+
+impl<'de, V> VariantAccess<'de> for BinaryVariantAccess<'de, V>
+where
+    V: VariantAccess<'de>,
+{
+    type Error = V::Error;
+
+    fn unit_variant(self) -> Result<(), Self::Error> {
+        self.variant.unit_variant()
+    }
+
+    fn newtype_variant_seed<T>(self, seed: T) -> Result<T::Value, V::Error>
+    where
+        T: DeserializeSeed<'de>,
+    {
+        self.variant.newtype_variant_seed(BinarySeed {
+            seed,
+            buffers: self.buffers,
+        })
+    }
+
+    fn tuple_variant<T>(self, len: usize, visitor: T) -> Result<T::Value, V::Error>
+    where
+        T: Visitor<'de>,
+    {
+        self.variant.tuple_variant(
+            len,
+            BinaryVisitor {
+                visitor,
+                buffers: self.buffers,
+            },
+        )
+    }
+
+    fn struct_variant<T>(
+        self,
+        fields: &'static [&'static str],
+        visitor: T,
+    ) -> Result<T::Value, V::Error>
+    where
+        T: Visitor<'de>,
+    {
+        self.variant.struct_variant(
+            fields,
+            BinaryVisitor {
+                visitor,
+                buffers: self.buffers,
+            },
+        )
+    }
+}
+
+impl<'b, T> DeserializeSeed<'b> for BinarySeed<'b, T>
+where
+    T: DeserializeSeed<'b>,
+{
+    type Value = T::Value;
+
+    fn deserialize<D>(self, d: D) -> Result<T::Value, D::Error>
+    where
+        D: Deserializer<'b>,
+    {
+        let wrapper = BinaryDeserializer {
+            d,
+            buffers: self.buffers,
+        };
+        self.seed.deserialize(wrapper)
     }
 }
 
@@ -342,5 +433,21 @@ mod tests {
         let arg = BinaryArg(&json, &attachments[..]);
         let res: BinaryOwned = deserialize(&arg).unwrap();
         assert_eq!(res.array, attachment[..].to_vec());
+    }
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    enum Enum {
+        A(i8),
+        B(u32),
+        C(Vec<u8>),
+    }
+
+    #[test]
+    fn test_enum_passthrough() {
+        let attachments = [];
+        let json = Cow::Owned(RawValue::from_string("{\"B\": 23}".to_string()).unwrap());
+        let arg = BinaryArg(&json, &attachments[..]);
+        let res: Enum = deserialize(&arg).unwrap();
+        assert_eq!(res, Enum::B(23));
     }
 }
