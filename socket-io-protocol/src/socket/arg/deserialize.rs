@@ -3,12 +3,13 @@ use std::fmt;
 use paste::paste;
 use serde::{
     de::{
-        value::BorrowedStrDeserializer, DeserializeSeed, EnumAccess, Error as DeError, MapAccess,
-        SeqAccess, VariantAccess, Visitor,
+        value::{BorrowedStrDeserializer, SeqDeserializer},
+        DeserializeSeed, EnumAccess, Error as DeError, MapAccess, SeqAccess, VariantAccess,
+        Visitor,
     },
     Deserialize, Deserializer,
 };
-use serde_json::{value::RawValue, Deserializer as JsonDeserializer, Error as JsonError};
+use serde_json::{Deserializer as JsonDeserializer, Error as JsonError};
 
 use super::BinaryArg;
 
@@ -39,6 +40,12 @@ where
 
 type Buffers<'a> = &'a [&'a [u8]];
 
+enum AccessType {
+    Bytes,
+    Seq,
+    Neither,
+}
+
 struct BinaryDeserializer<'de, D>
 where
     D: Deserializer<'de>,
@@ -53,6 +60,7 @@ where
 {
     visitor: V,
     buffers: Buffers<'de>,
+    access_type: AccessType,
 }
 
 struct BinarySeqAccess<'de, S>
@@ -106,7 +114,11 @@ macro_rules! deserialize_forward {
                 {
                     self.d.[<deserialize_ $fn>](
                             $( $arg , )*
-                            BinaryVisitor { visitor, buffers: self.buffers }
+                            BinaryVisitor {
+                                visitor,
+                                buffers: self.buffers,
+                                access_type: AccessType::Neither,
+                            }
                         )
                 }
             }
@@ -115,14 +127,20 @@ macro_rules! deserialize_forward {
 }
 
 macro_rules! deserialize_forward_any {
-    ($($fn:ident ( $( $arg:ident : $ty:ty),* ) , )*) => {
+    ($($fn:ident ( $at:expr $(, $arg:ident : $ty:ty)* ) , )*) => {
         $(
             paste!{
+                #[allow(unused_variables)]
                 fn [<deserialize_ $fn>]<V>(self, $( $arg: $ty , )* visitor: V) -> Result<V::Value, D::Error>
                 where
                     V: Visitor<'de>
                 {
-                    self.d.deserialize_any(BinaryVisitor { visitor, buffers: self.buffers })
+                    self.d.deserialize_any(
+                        BinaryVisitor {
+                            visitor,
+                            buffers: self.buffers,
+                            access_type: $at,
+                        })
                 }
             }
         )*
@@ -153,11 +171,7 @@ where
         unit(),
         unit_struct(name: &'static str),
         newtype_struct(name: &'static str),
-        seq(),
-        tuple(len: usize),
-        tuple_struct(name: &'static str, len: usize),
         map(),
-        struct(name: &'static str, fields: &'static [&'static str]),
         enum(name: &'static str, variants: &'static [&'static str]),
         identifier(),
         ignored_any(),
@@ -166,10 +180,14 @@ where
     }
 
     deserialize_forward_any! {
-        str(),
-        string(),
-        bytes(),
-        byte_buf(),
+        str(AccessType::Bytes),
+        string(AccessType::Bytes),
+        bytes(AccessType::Bytes),
+        byte_buf(AccessType::Bytes),
+        seq(AccessType::Seq),
+        tuple(AccessType::Seq, len: usize),
+        tuple_struct(AccessType::Seq, name: &'static str, len: usize),
+        struct(AccessType::Seq, name: &'static str, fields: &'static [&'static str]),
     }
 
     fn is_human_readable(&self) -> bool {
@@ -289,7 +307,12 @@ where
                     self.buffers.len()
                 ))
             })?;
-            self.visitor.visit_borrowed_bytes(buffer)
+            match self.access_type {
+                AccessType::Bytes => self.visitor.visit_borrowed_bytes(buffer),
+                AccessType::Seq | AccessType::Neither => self
+                    .visitor
+                    .visit_seq(SeqDeserializer::new(buffer.iter().copied())),
+            }
         } else {
             let map = BinaryMapAccess {
                 map,
@@ -369,6 +392,7 @@ where
             BinaryVisitor {
                 visitor,
                 buffers: self.buffers,
+                access_type: AccessType::Seq,
             },
         )
     }
@@ -386,6 +410,7 @@ where
             BinaryVisitor {
                 visitor,
                 buffers: self.buffers,
+                access_type: AccessType::Seq,
             },
         )
     }
