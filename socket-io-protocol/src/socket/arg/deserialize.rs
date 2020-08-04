@@ -93,8 +93,7 @@ where
 {
     map: M,
     buffers: Buffers<'a>,
-    entry0: Option<Option<(&'a str, &'a RawValue)>>,
-    entry1: Option<Option<(&'a str, &'a RawValue)>>,
+    first_key: Option<Option<&'a str>>,
 }
 
 macro_rules! deserialize_forward {
@@ -275,36 +274,29 @@ where
     where
         A: MapAccess<'de>,
     {
-        let entry0: Option<(&'de str, &'de RawValue)> = map.next_entry()?;
-        let entry1: Option<(&'de str, &'de RawValue)> = if entry0.is_some() {
-            map.next_entry()?
+        let key: Option<&'de str> = map.next_key()?;
+        if key == Some("_placeholder") {
+            let _: bool = map.next_value()?;
+            let next_key: Option<&'de str> = map.next_key()?;
+            if next_key != Some("num") {
+                return Err(A::Error::custom("_placeholder key present without num key"));
+            }
+            let num: u64 = map.next_value()?;
+            let buffer = self.buffers.get(num as usize).ok_or_else(|| {
+                A::Error::custom(format!(
+                    "Placeholder num out of range: {}/{}",
+                    num,
+                    self.buffers.len()
+                ))
+            })?;
+            self.visitor.visit_borrowed_bytes(buffer)
         } else {
-            None
-        };
-        match (entry0, entry1) {
-            (Some(("_placeholder", _)), Some(("num", num)))
-            | (Some(("num", num)), Some(("_placeholder", _))) => {
-                let mut deserializer = JsonDeserializer::from_str(num.get());
-                let num =
-                    u64::deserialize(&mut deserializer).map_err(|err| A::Error::custom(err))?;
-                let buffer = self.buffers.get(num as usize).ok_or_else(|| {
-                    A::Error::custom(format!(
-                        "Placeholder num out of range: {}/{}",
-                        num,
-                        self.buffers.len()
-                    ))
-                })?;
-                self.visitor.visit_borrowed_bytes(buffer)
-            }
-            (entry0, entry1) => {
-                let map = BinaryMapAccess {
-                    map,
-                    buffers: self.buffers,
-                    entry0: Some(entry0),
-                    entry1: Some(entry1),
-                };
-                self.visitor.visit_map(map)
-            }
+            let map = BinaryMapAccess {
+                map,
+                buffers: self.buffers,
+                first_key: Some(key),
+            };
+            self.visitor.visit_map(map)
         }
     }
 }
@@ -409,21 +401,17 @@ where
     where
         K: DeserializeSeed<'de>,
     {
-        match (self.entry0, self.entry1, &mut self.map) {
-            (Some(entry), _, _) | (None, Some(entry), _) => {
-                let key = entry.map(|(key, _)| key);
-                if let Some(k) = key {
-                    let deserializer = BorrowedStrDeserializer::new(k);
-                    seed.deserialize(deserializer).map(Some)
-                } else {
-                    Ok(None)
-                }
+        if let Some(key) = self.first_key.take() {
+            if let Some(key) = key {
+                let deserializer = BorrowedStrDeserializer::new(key);
+                seed.deserialize(deserializer).map(Some)
+            } else {
+                Ok(None)
             }
-            (None, None, map) => {
-                // TODO(me@seanp.xyz): This isn't passing the buffers along because the keys should
-                // just be strings, but it's possible this assumption is wrong.
-                map.next_key_seed(seed)
-            }
+        } else {
+            // TODO(me@seanp.xyz): This isn't passing the buffers along because the keys should
+            // just be strings, but it's possible this assumption is wrong.
+            self.map.next_key_seed(seed)
         }
     }
 
@@ -431,22 +419,10 @@ where
     where
         V: DeserializeSeed<'de>,
     {
-        if let Some(entry) = self.entry0.take() {
-            let value = entry.unwrap().1;
-            let mut deserializer = JsonDeserializer::from_str(value.get());
-            seed.deserialize(&mut deserializer)
-                .map_err(|err| M::Error::custom(err))
-        } else if let Some(entry) = self.entry1.take() {
-            let value = entry.unwrap().1;
-            let mut deserializer = JsonDeserializer::from_str(value.get());
-            seed.deserialize(&mut deserializer)
-                .map_err(|err| M::Error::custom(err))
-        } else {
-            self.map.next_value_seed(BinarySeed {
-                seed,
-                buffers: self.buffers,
-            })
-        }
+        self.map.next_value_seed(BinarySeed {
+            seed,
+            buffers: self.buffers,
+        })
     }
 }
 
