@@ -22,6 +22,7 @@ pub struct Client {
     pub send: mpsc::UnboundedSender<WsMessage>,
     pub receive: mpsc::UnboundedReceiver<WsMessage>,
     close_handle: Option<(oneshot::Sender<()>, RemoteHandle<Result<(), Error>>)>,
+    receive_handle: RemoteHandle<Result<(), receive_task::Error>>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -55,7 +56,7 @@ impl Client {
     pub async fn connect<C, F, S, E>(
         url: impl AsRef<str>,
         connect: C,
-        spawn: impl Spawn,
+        spawn: &impl Spawn,
     ) -> Result<Client, Error>
     where
         C: 'static + Fn(Host, Port) -> F,
@@ -64,7 +65,7 @@ impl Client {
         E: 'static + StdError + Send,
     {
         let url = url.as_ref();
-        let mut url = parse_url(url).map_err(|e| Error::UrlError(url.to_string(), e))?;
+        let url = parse_url(url).map_err(|e| Error::UrlError(url.to_string(), e))?;
 
         add_socketio_query_params(&mut url);
 
@@ -75,21 +76,13 @@ impl Client {
         .await
         .map_err(|e| Error::ConnectionError(Box::new(e)))?;
 
-        let (stream, _) = async_tls::client_async_tls(url.to_string(), connection).await?;
-
-        let (send, receive, close, handle) = process_websocket(stream, &spawn).await?;
-
-        Ok(Client {
-            send,
-            receive,
-            close_handle: Some((close, handle)),
-        })
+        Client::new(url, connection, spawn).await
     }
 
     pub async fn from_stream<S>(
         url: impl AsRef<str>,
         connection: S,
-        spawn: impl Spawn,
+        spawn: &impl Spawn,
     ) -> Result<Client, Error>
     where
         S: 'static + AsyncRead + AsyncWrite + Unpin + Send,
@@ -97,6 +90,10 @@ impl Client {
         let url = url.as_ref();
         let mut url = parse_url(url).map_err(|e| Error::UrlError(url.to_string(), e))?;
 
+        Client::new(url, connection, spawn).await
+    }
+
+    async fn new<S>(mut url: Url, connection: S, spawn: &impl Spawn) -> Result<Client, Error> {
         add_socketio_query_params(&mut url);
 
         let (stream, _) = async_tls::client_async_tls(url.to_string(), connection).await?;

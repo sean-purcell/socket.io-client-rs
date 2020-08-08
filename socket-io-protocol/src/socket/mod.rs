@@ -1,4 +1,4 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, ops::Range};
 
 use regex::Regex;
 use serde::{Deserialize, Deserializer};
@@ -6,17 +6,26 @@ use serde_json::{value::RawValue, Error as JsonError};
 
 use super::engine::Message as EngineMessage;
 
-mod arg;
+pub mod arg;
 
 #[derive(Debug)]
 #[cfg_attr(test, derive(PartialEq))]
-pub struct Packet<'a> {
-    pub data: PacketData<'a>,
-    pub namespace: Option<Cow<'a, str>>,
+pub struct Packet {
+    message: OwnedSubslice<String>,
+    kind: Kind,
+    namespace: Range<usize>,
+    args: Vec<Range<usize>>,
+}
+
+pub struct Kind {
+    Connect,
+    Disconnect,
+    Event,
+    Ack,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
-pub enum PacketKind {
+enum PacketKind {
     Connect,
     Disconnect,
     Event,
@@ -27,7 +36,7 @@ pub enum PacketKind {
 
 #[derive(Debug)]
 #[cfg_attr(test, derive(PartialEq))]
-pub enum PacketData<'a> {
+enum PacketData<'a> {
     Connect,
     Disconnect,
     Event {
@@ -60,7 +69,7 @@ pub struct BinaryArgs<'a> {
 
 #[derive(Debug)]
 #[cfg_attr(test, derive(PartialEq))]
-pub struct Partial<'a>(Parse<'a>);
+pub struct Partial(Parse);
 
 #[derive(Debug)]
 #[cfg_attr(test, derive(PartialEq))]
@@ -89,12 +98,13 @@ pub enum Error {
 
 #[derive(Copy, Clone, Debug)]
 #[cfg_attr(test, derive(PartialEq))]
-struct Parse<'a> {
+struct Parse {
+    message: OwnedSubslice<String>,
     kind: PacketKind,
     attachments: Option<u64>,
-    namespace: Option<&'a str>,
+    namespace: Option<Range<usize>>,
     id: Option<u64>,
-    args: Option<&'a str>,
+    args: Option<Range<usize>>,
 }
 
 lazy_static::lazy_static! {
@@ -104,15 +114,15 @@ lazy_static::lazy_static! {
     };
 }
 
-pub fn deserialize<'a>(msg: EngineMessage<'a>) -> Result<DeserializeResult<'a>, Error> {
+pub fn deserialize(msg: EngineMessage) -> Result<DeserializeResult, Error> {
     match msg {
         EngineMessage::Text(text) => deserialize_text(text),
         EngineMessage::Binary(data) => Err(Error::NonAttachmentBinary(data.to_vec())),
     }
 }
 
-fn parse_text<'a>(text: &'a str) -> Option<Parse<'a>> {
-    let captures = DESERIALIZE_RE.captures(text)?;
+fn parse_text(text: OwnedSubslice<String>) -> Option<Parse> {
+    let captures = DESERIALIZE_RE.captures(&*text)?;
     let kind = {
         use PacketKind::*;
         match *captures
@@ -133,10 +143,11 @@ fn parse_text<'a>(text: &'a str) -> Option<Parse<'a>> {
         }
     };
     let attachments = captures.get(3).map(|x| x.as_str().parse::<u64>().unwrap());
-    let namespace = captures.get(5).map(|x| x.as_str());
+    let namespace = captures.get(5).map(|x| x.range());
     let id = captures.get(6).map(|x| x.as_str().parse::<u64>().unwrap());
-    let args = captures.get(7).map(|x| x.as_str());
+    let args = captures.get(7).map(|x| x.range());
     Some(Parse {
+        message: text,
         kind,
         attachments,
         namespace,
@@ -145,16 +156,16 @@ fn parse_text<'a>(text: &'a str) -> Option<Parse<'a>> {
     })
 }
 
-fn deserialize_text<'a>(text: &'a str) -> Result<DeserializeResult<'a>, Error> {
+fn deserialize_text(text: OwnedSubslice<String>) -> Result<DeserializeResult, Error> {
     let parse = parse_text(text).ok_or_else(|| Error::InvalidMessage(text.to_string()))?;
-    let namespace = parse.namespace.map(|x| x.into());
+    let namespace = || parse.namespace.map(|x| parse.message[x].to_string());
     let argsless = |name, kind| {
         if parse.attachments.is_some() || parse.id.is_some() || parse.args.is_some() {
             Err(Error::InvalidExtraData(name, text.to_string()))
         } else {
             Ok(DeserializeResult::Packet(Packet {
                 data: kind,
-                namespace: namespace.clone(),
+                namespace: namespace(),
             }))
         }
     };
@@ -177,7 +188,7 @@ fn deserialize_text<'a>(text: &'a str) -> Result<DeserializeResult<'a>, Error> {
             };
             Ok(DeserializeResult::Packet(Packet {
                 data,
-                namespace: namespace.clone(),
+                namespace: namespace(),
             }))
         }
     };
@@ -227,7 +238,7 @@ pub fn deserialize_partial<'a>(
     deserialize_binary(parse, buffers)
 }
 
-fn deserialize_binary<'a>(parse: Parse<'a>, buffers: Vec<&'a [u8]>) -> Result<Packet<'a>, Error> {
+fn deserialize_binary<'a>(parse: Parse, buffers: Vec<&'a [u8]>) -> Result<Packet<'a>, Error> {
     let actual = buffers.len() as u64;
     let expected = parse.attachments.unwrap();
     if actual != expected {
@@ -259,7 +270,7 @@ impl<'a> DeserializeResult<'a> {
     }
 }
 
-impl<'a> Partial<'a> {
+impl Partial {
     pub fn attachments(&self) -> u64 {
         self.0.attachments.unwrap()
     }

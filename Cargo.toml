@@ -1,6 +1,7 @@
 [workspace]
 
 members = [
+    "owned_subslice",
     "socket-io-client",
     "socket-io-protocol",
 ]
