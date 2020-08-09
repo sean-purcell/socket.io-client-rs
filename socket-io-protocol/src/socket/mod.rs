@@ -2,7 +2,6 @@ use std::ops::Range;
 
 use owned_subslice::OwnedSubslice;
 use regex::Regex;
-use serde::Deserialize;
 use serde_json::{value::RawValue, Error as JsonError};
 
 use super::engine::Message as EngineMessage;
@@ -12,9 +11,10 @@ use super::engine::Message as EngineMessage;
 pub struct Packet {
     message: OwnedSubslice<String>,
     kind: Kind,
-    namespace: Range<usize>,
+    namespace: Option<Range<usize>>,
+    id: Option<u64>,
     args: Vec<Range<usize>>,
-    placeholders: Vec<OwnedSubslice<Vec<u8>>>,
+    attachments: Vec<OwnedSubslice<Vec<u8>>>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -26,7 +26,7 @@ pub enum Kind {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
-enum PacketKind {
+enum ParseKind {
     Connect,
     Disconnect,
     Event,
@@ -68,7 +68,7 @@ pub enum Error {
 #[cfg_attr(test, derive(PartialEq))]
 struct Parse {
     message: OwnedSubslice<String>,
-    kind: PacketKind,
+    kind: ParseKind,
     attachments: Option<u64>,
     namespace: Option<Range<usize>>,
     id: Option<u64>,
@@ -97,7 +97,7 @@ fn parse_text(text: OwnedSubslice<String>) -> Result<Parse, Error> {
         .captures(&*text)
         .ok_or_else(|| Error::InvalidMessage(text.to_string()))?;
     let kind = {
-        use PacketKind::*;
+        use ParseKind::*;
         match *captures
             .get(1)
             .unwrap()
@@ -156,26 +156,97 @@ fn parse_args<'a>(arg_str: &'a str) -> Result<Vec<Range<usize>>, Error> {
 }
 
 fn deserialize_text(text: OwnedSubslice<String>) -> Result<DeserializeResult, Error> {
-    unimplemented!()
+    let parse = parse_text(text)?;
+
+    match parse.kind {
+        ParseKind::Connect => deserialize_dataless(parse, Kind::Connect, "connect")
+            .map(|p| DeserializeResult::Packet(p)),
+        ParseKind::Disconnect => deserialize_dataless(parse, Kind::Disconnect, "disconnect")
+            .map(DeserializeResult::Packet),
+        ParseKind::Event => deserialize_event(parse, Kind::Event, "event", Vec::new())
+            .map(DeserializeResult::Packet),
+        ParseKind::Ack => {
+            deserialize_event(parse, Kind::Ack, "ack", Vec::new()).map(DeserializeResult::Packet)
+        }
+        ParseKind::BinaryEvent => deserialize_binary(parse, Kind::Event, "binary event"),
+        ParseKind::BinaryAck => deserialize_binary(parse, Kind::Ack, "binary ack"),
+    }
+}
+
+fn deserialize_dataless(parse: Parse, kind: Kind, name: &'static str) -> Result<Packet, Error> {
+    if parse.attachments.is_some() || parse.id.is_some() || parse.args.len() > 0 {
+        return Err(Error::InvalidExtraData(name, parse.message.to_string()));
+    }
+    Ok(Packet {
+        message: parse.message,
+        kind,
+        namespace: parse.namespace,
+        id: None,
+        args: Vec::new(),
+        attachments: Vec::new(),
+    })
+}
+
+fn deserialize_binary(
+    parse: Parse,
+    kind: Kind,
+    name: &'static str,
+) -> Result<DeserializeResult, Error> {
+    if let Some(attachments) = parse.attachments {
+        if attachments == 0 {
+            deserialize_event(parse, kind, name, Vec::new()).map(DeserializeResult::Packet)
+        } else {
+            Ok(DeserializeResult::DataNeeded(Partial(parse)))
+        }
+    } else {
+        Err(Error::MissingData(name, parse.message.to_string()))
+    }
 }
 
 pub fn deserialize_partial(
     partial: Partial,
-    buffers: impl IntoIterator<Item = EngineMessage>,
+    attachments: impl IntoIterator<Item = EngineMessage>,
 ) -> Result<Packet, Error> {
     let Partial(parse) = partial;
-    let buffers = buffers
+    let attachments = attachments
         .into_iter()
         .map(|x| match x {
             EngineMessage::Text(text) => Err(Error::TextAttachment(text.to_string())),
             EngineMessage::Binary(data) => Ok(data),
         })
         .collect::<Result<_, _>>()?;
-    deserialize_binary(parse, buffers)
+    match parse.kind {
+        ParseKind::BinaryEvent => {
+            deserialize_event(parse, Kind::Event, "binary event", attachments)
+        }
+        ParseKind::BinaryAck => deserialize_event(parse, Kind::Ack, "binary ack", attachments),
+        _ => unreachable!(),
+    }
 }
 
-fn deserialize_binary(parse: Parse, buffers: Vec<OwnedSubslice<Vec<u8>>>) -> Result<Packet, Error> {
-    unimplemented!()
+fn deserialize_event(
+    parse: Parse,
+    kind: Kind,
+    name: &'static str,
+    attachments: Vec<OwnedSubslice<Vec<u8>>>,
+) -> Result<Packet, Error> {
+    if (kind == Kind::Ack && parse.id.is_none()) || parse.args.len() == 0 {
+        return Err(Error::MissingData(name, parse.message.to_string()));
+    }
+    if attachments.len() as u64 != parse.attachments.unwrap_or(0) {
+        return Err(Error::InvalidAttachmentCount(
+            attachments.len() as u64,
+            parse.attachments.unwrap_or(0),
+        ));
+    }
+    Ok(Packet {
+        message: parse.message,
+        kind,
+        namespace: parse.namespace,
+        id: parse.id,
+        args: parse.args,
+        attachments,
+    })
 }
 
 impl DeserializeResult {
@@ -196,6 +267,10 @@ impl Partial {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn range(start: usize, end: usize) -> Range<usize> {
+        Range { start, end }
+    }
 
     #[test]
     fn test_deserialize_re() {
@@ -236,15 +311,16 @@ mod tests {
     #[test]
     fn test_parse_text() {
         let m = "50-/nsp,1[\"binary namespaced message with ack\"]";
-        let parse = parse_text(m).unwrap();
+        let parse = parse_text(m.to_string().into()).unwrap();
         assert_eq!(
             parse,
             Parse {
-                kind: PacketKind::BinaryEvent,
+                message: m.to_string().into(),
+                kind: ParseKind::BinaryEvent,
                 attachments: Some(0),
-                namespace: Some("/nsp"),
+                namespace: Some(range(3, 7)),
                 id: Some(1),
-                args: Some("[\"binary namespaced message with ack\"]"),
+                args: vec![range(10, 46)],
             }
         );
     }
@@ -253,10 +329,14 @@ mod tests {
     fn test_deserialize_connect() {
         let m = "0/nsp,";
         assert_eq!(
-            deserialize(EngineMessage::Text(m)).unwrap(),
+            deserialize(EngineMessage::Text(m.to_string().into())).unwrap(),
             DeserializeResult::Packet(Packet {
-                data: PacketData::Connect,
-                namespace: Some("/nsp".into())
+                message: m.to_string().into(),
+                kind: Kind::Connect,
+                namespace: Some(range(1, 5)),
+                id: None,
+                args: Vec::new(),
+                attachments: Vec::new(),
             })
         );
     }
@@ -265,10 +345,14 @@ mod tests {
     fn test_deserialize_disconnect() {
         let m = "1/nsp,";
         assert_eq!(
-            deserialize(EngineMessage::Text(m)).unwrap(),
+            deserialize(EngineMessage::Text(m.to_string().into())).unwrap(),
             DeserializeResult::Packet(Packet {
-                data: PacketData::Disconnect,
-                namespace: Some("/nsp".into())
+                message: m.to_string().into(),
+                kind: Kind::Disconnect,
+                namespace: Some(range(1, 5)),
+                id: None,
+                args: Vec::new(),
+                attachments: Vec::new(),
             })
         );
     }
@@ -276,19 +360,15 @@ mod tests {
     #[test]
     fn test_deserialize_event() {
         let m = "23[\"test\",\"hello\",{\"key\":\"value\"}]";
-        let arg_strs = vec!["\"test\"", "\"hello\"", "{\"key\":\"value\"}"];
-        let args = Args(
-            arg_strs
-                .iter()
-                .map(|x| RawValue::from_string(x.to_string()).unwrap())
-                .map(Cow::Owned)
-                .collect(),
-        );
         assert_eq!(
-            deserialize(EngineMessage::Text(m)).unwrap(),
+            deserialize(EngineMessage::Text(m.to_string().into())).unwrap(),
             DeserializeResult::Packet(Packet {
-                data: PacketData::Event { id: Some(3), args },
+                message: m.to_string().into(),
+                kind: Kind::Event,
                 namespace: None,
+                id: Some(3),
+                args: vec![range(3, 9), range(10, 17), range(18, 33)],
+                attachments: Vec::new(),
             })
         );
     }
@@ -296,19 +376,15 @@ mod tests {
     #[test]
     fn test_deserialize_ack() {
         let m = "33[\"test\",\"hello\",{\"key\":\"value\"}]";
-        let arg_strs = vec!["\"test\"", "\"hello\"", "{\"key\":\"value\"}"];
-        let args = Args(
-            arg_strs
-                .iter()
-                .map(|x| RawValue::from_string(x.to_string()).unwrap())
-                .map(Cow::Owned)
-                .collect(),
-        );
         assert_eq!(
-            deserialize(EngineMessage::Text(m)).unwrap(),
+            deserialize(EngineMessage::Text(m.to_string().into())).unwrap(),
             DeserializeResult::Packet(Packet {
-                data: PacketData::Ack { id: 3, args },
+                message: m.to_string().into(),
+                kind: Kind::Ack,
                 namespace: None,
+                id: Some(3),
+                args: vec![range(3, 9), range(10, 17), range(18, 33)],
+                attachments: Vec::new(),
             })
         );
     }
@@ -317,32 +393,24 @@ mod tests {
     fn test_deserialize_binary_event() {
         let m = "51-[\"binary\",{\"_placeholder\":true,\"num\":0}]";
         let attachment = vec![222, 173, 190, 239];
-        let attachments = vec![EngineMessage::Binary(&*attachment)];
-        let arg_strs = vec!["\"binary\"", "{\"_placeholder\":true,\"num\":0}"];
+        let attachments = vec![EngineMessage::Binary(attachment.clone().into())];
 
-        let partial = match deserialize(EngineMessage::Text(m)).unwrap() {
+        let partial = match deserialize(EngineMessage::Text(m.to_string().into())).unwrap() {
             DeserializeResult::DataNeeded(partial) => partial,
             _ => unreachable!(),
         };
 
-        let packet = deserialize_partial(partial, attachments).unwrap();
+        let packet = deserialize_partial(partial, attachments.clone()).unwrap();
 
-        let args = Args(
-            arg_strs
-                .iter()
-                .map(|x| RawValue::from_string(x.to_string()).unwrap())
-                .map(Cow::Owned)
-                .collect(),
-        );
-        let buffers = vec![&*attachment];
         assert_eq!(
             packet,
             Packet {
-                data: PacketData::BinaryEvent {
-                    id: None,
-                    args: BinaryArgs { args, buffers },
-                },
-                namespace: None
+                message: m.to_string().into(),
+                kind: Kind::Event,
+                namespace: None,
+                id: None,
+                args: vec![range(4, 12), range(13, 42)],
+                attachments: vec![attachment.into()],
             }
         );
     }
@@ -351,57 +419,25 @@ mod tests {
     fn test_deserialize_binary_ack() {
         let m = "61-10[\"binary\",{\"_placeholder\":true,\"num\":0}]";
         let attachment = vec![222, 173, 190, 239];
-        let attachments = vec![EngineMessage::Binary(&*attachment)];
-        let arg_strs = vec!["\"binary\"", "{\"_placeholder\":true,\"num\":0}"];
+        let attachments = vec![EngineMessage::Binary(attachment.clone().into())];
 
-        let partial = match deserialize(EngineMessage::Text(m)).unwrap() {
+        let partial = match deserialize(EngineMessage::Text(m.to_string().into())).unwrap() {
             DeserializeResult::DataNeeded(partial) => partial,
             _ => unreachable!(),
         };
 
-        let packet = deserialize_partial(partial, attachments).unwrap();
+        let packet = deserialize_partial(partial, attachments.clone()).unwrap();
 
-        let args = Args(
-            arg_strs
-                .iter()
-                .map(|x| RawValue::from_string(x.to_string()).unwrap())
-                .map(Cow::Owned)
-                .collect(),
-        );
-        let buffers = vec![&*attachment];
         assert_eq!(
             packet,
             Packet {
-                data: PacketData::BinaryAck {
-                    id: 10,
-                    args: BinaryArgs { args, buffers },
-                },
-                namespace: None
+                message: m.to_string().into(),
+                kind: Kind::Ack,
+                namespace: None,
+                id: Some(10),
+                args: vec![range(6, 14), range(15, 44)],
+                attachments: vec![attachment.into()],
             }
         );
-    }
-
-    #[test]
-    fn test_deserialize_zero_copy() {
-        let m = "33[\"test\",\"hello\",{\"key\":\"value\"}]";
-        let args = match deserialize(EngineMessage::Text(m))
-            .unwrap()
-            .packet()
-            .unwrap()
-            .data
-        {
-            PacketData::Ack { args, .. } => args,
-            _ => unreachable!(),
-        };
-
-        for arg in args.0 {
-            match arg {
-                Cow::Borrowed(_) => (),
-                Cow::Owned(_) => panic!(
-                    "Data was copied when it could have been borrowed: {:?}",
-                    arg
-                ),
-            }
-        }
     }
 }

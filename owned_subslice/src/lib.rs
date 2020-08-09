@@ -102,6 +102,26 @@ where
     }
 }
 
+impl<S> PartialEq<&S::Output> for OwnedSubslice<S>
+where
+    S: Index<Range<usize>>,
+    S::Output: PartialEq,
+{
+    fn eq(&self, other: &&S::Output) -> bool {
+        (**self) == (**other)
+    }
+}
+
+impl<S> PartialEq<OwnedSubslice<S>> for &S::Output
+where
+    S: Index<Range<usize>>,
+    S::Output: PartialEq,
+{
+    fn eq(&self, other: &OwnedSubslice<S>) -> bool {
+        (**self) == (**other)
+    }
+}
+
 impl<S> Eq for OwnedSubslice<S>
 where
     S: Index<Range<usize>>,

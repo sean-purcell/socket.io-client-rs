@@ -4,7 +4,7 @@ use tungstenite::Message as WsMessage;
 
 use owned_subslice::OwnedSubslice;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Packet {
     Open(Open),
     Close,
@@ -13,7 +13,7 @@ pub enum Packet {
     Message(Message),
 }
 
-#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Open {
     sid: String,
@@ -21,7 +21,7 @@ pub struct Open {
     ping_interval: u64,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Message {
     Text(OwnedSubslice<String>),
     Binary(OwnedSubslice<Vec<u8>>),
@@ -154,7 +154,7 @@ mod tests {
     fn decode_close() {
         let mut decoder = Decoder::new();
 
-        assert!(decoder.decode(&WsMessage::Close(None)).is_err());
+        assert!(decoder.decode(WsMessage::Close(None)).is_err());
     }
 
     #[test]
@@ -163,14 +163,14 @@ mod tests {
 
         let msg = WsMessage::Text(
             "0{\"sid\":\"0vtWsEAcESDOoPs8AAAA\",\"upgrades\":[],\"pingInterval\":25000,\"pingTimeout\":5000}".to_string());
-        let packet = decoder.decode(msg).unwrap();
+        let packet = decoder.decode(msg.clone()).unwrap();
         let expected = Packet::Open(Open {
             sid: String::from("0vtWsEAcESDOoPs8AAAA"),
             ping_interval: 25000,
             ping_timeout: 5000,
         });
         assert_eq!(packet, expected);
-        let result = decoder.decode(&msg);
+        let result = decoder.decode(msg);
         assert!(result.is_err());
     }
 }
