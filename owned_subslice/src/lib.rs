@@ -92,6 +92,23 @@ where
     }
 }
 
+impl<S> PartialEq<OwnedSubslice<S>> for OwnedSubslice<S>
+where
+    S: Index<Range<usize>>,
+    S::Output: PartialEq,
+{
+    fn eq(&self, other: &OwnedSubslice<S>) -> bool {
+        (**self) == (**other)
+    }
+}
+
+impl<S> Eq for OwnedSubslice<S>
+where
+    S: Index<Range<usize>>,
+    S::Output: Eq,
+{
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -115,30 +115,34 @@ impl Decoder {
                     Ok(Packet::Pong)
                 }
             }
-            '4' => Ok(Packet::Message(Message::Text(OwnedSubslice::new(
-                text,
-                1..text.len(),
-            )))),
+            '4' => {
+                let len = text.len();
+                Ok(Packet::Message(Message::Text(OwnedSubslice::new(
+                    text,
+                    1..len,
+                ))))
+            }
             _ => Err(invalid_msg()),
         }
     }
 
-    fn decode_binary<'a>(&mut self, data: Vec<u8>) -> Result<Packet, Error> {
+    fn decode_binary(&mut self, data: Vec<u8>) -> Result<Packet, Error> {
         let invalid_msg = || Error::InvalidMessage(WsMessage::Binary(data.to_vec()));
         if self.state == State::Initial {
             Err(Error::MessageBeforeOpen)
-        } else if data.get(0).ok_or_else(invalid_msg)? != 4 {
+        } else if *data.get(0).ok_or_else(invalid_msg)? != 4 {
             Err(invalid_msg())
         } else {
+            let len = data.len();
             Ok(Packet::Message(Message::Binary(OwnedSubslice::new(
                 data,
-                1..data.len(),
+                1..len,
             ))))
         }
     }
 }
 
-fn parse_open<'a>(text: &'a str) -> Result<Open, Error> {
+fn parse_open(text: &str) -> Result<Open, Error> {
     Ok(serde_json::from_str(text)?)
 }
 
