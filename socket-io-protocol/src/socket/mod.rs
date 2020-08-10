@@ -9,7 +9,7 @@ mod args;
 mod parse;
 
 pub use args::Arg;
-pub use parse::{deserialize, deserialize_partial, Partial};
+pub use parse::{deserialize, deserialize_partial, DeserializeResult, Partial};
 
 #[derive(Debug)]
 #[cfg_attr(test, derive(PartialEq))]

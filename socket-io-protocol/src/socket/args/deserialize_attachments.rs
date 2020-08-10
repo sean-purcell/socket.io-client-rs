@@ -469,10 +469,6 @@ where
 mod tests {
     use super::*;
 
-    use std::borrow::Cow;
-
-    use serde_json::value::RawValue;
-
     #[derive(Debug, Deserialize)]
     struct BinaryNoTranslate {
         array: Placeholder,
@@ -487,13 +483,10 @@ mod tests {
     #[test]
     fn test_translate() {
         let attachment = [222, 173, 190, 239];
-        let attachments = [&attachment[..]];
-        let json = Cow::Owned(
-            RawValue::from_string("{\"array\": {\"_placeholder\":true,\"num\":0}}".to_string())
-                .unwrap(),
-        );
-        let arg = BinaryArg(&json, &attachments[..]);
-        let _ = deserialize::<BinaryNoTranslate>(&arg).expect_err("Deserialization succeeded");
+        let attachments = [attachment.to_vec().into()];
+        let json = "{\"array\": {\"_placeholder\":true,\"num\":0}}";
+        let _ = deserialize::<BinaryNoTranslate>(&json, &attachments[..])
+            .expect_err("Deserialization succeeded");
     }
 
     #[derive(Deserialize)]
@@ -504,13 +497,9 @@ mod tests {
     #[test]
     fn test_borrowed() {
         let attachment = [222, 173, 190, 239];
-        let attachments = [&attachment[..]];
-        let json = Cow::Owned(
-            RawValue::from_string("{\"array\": {\"_placeholder\":true,\"num\":0}}".to_string())
-                .unwrap(),
-        );
-        let arg = BinaryArg(&json, &attachments[..]);
-        let res: BinaryBorrowed = deserialize(&arg).unwrap();
+        let attachments = [attachment.to_vec().into()];
+        let json = "{\"array\": {\"_placeholder\":true,\"num\":0}}";
+        let res: BinaryBorrowed = deserialize(&json, &attachments[..]).unwrap();
         assert_eq!(res.array, &attachment[..]);
     }
 
@@ -522,26 +511,19 @@ mod tests {
     #[test]
     fn test_owned() {
         let attachment = [222, 173, 190, 239];
-        let attachments = [&attachment[..]];
-        let json = Cow::Owned(
-            RawValue::from_string("{\"array\": {\"_placeholder\":true,\"num\":0}}".to_string())
-                .unwrap(),
-        );
-        let arg = BinaryArg(&json, &attachments[..]);
-        let res: BinaryOwned = deserialize(&arg).unwrap();
-        assert_eq!(res.array, attachment[..].to_vec());
+        let attachments = [attachment.to_vec().into()];
+        let json = "{\"array\": {\"_placeholder\":true,\"num\":0}}";
+        let res: BinaryOwned = deserialize(&json, &attachments[..]).unwrap();
+        assert_eq!(res.array, attachment.to_vec());
     }
 
     #[test]
     fn test_passthrough() {
         let attachment = [222, 173, 190, 239];
         let attachments = [];
-        let json = Cow::Owned(
-            RawValue::from_string("{\"array\": [222, 173, 190, 239]}".to_string()).unwrap(),
-        );
-        let arg = BinaryArg(&json, &attachments[..]);
-        let res: BinaryOwned = deserialize(&arg).unwrap();
-        assert_eq!(res.array, attachment[..].to_vec());
+        let json = "{\"array\": [222, 173, 190, 239]}";
+        let res: BinaryOwned = deserialize(&json, &attachments[..]).unwrap();
+        assert_eq!(res.array, attachment.to_vec());
     }
 
     #[derive(Debug, Deserialize, PartialEq)]
@@ -554,9 +536,8 @@ mod tests {
     #[test]
     fn test_enum_passthrough() {
         let attachments = [];
-        let json = Cow::Owned(RawValue::from_string("{\"B\": 23}".to_string()).unwrap());
-        let arg = BinaryArg(&json, &attachments[..]);
-        let res: Enum = deserialize(&arg).unwrap();
+        let json = "{\"B\": 23}";
+        let res: Enum = deserialize(&json, &attachments[..]).unwrap();
         assert_eq!(res, Enum::B(23));
     }
 }

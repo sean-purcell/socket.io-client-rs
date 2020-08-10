@@ -101,13 +101,12 @@ mod tests {
     #[test]
     fn test_text_arg_value() {
         let m = "23[\"test\",\"hello\",{\"key\":\"value\"}]";
-        let args = match deserialize(EngineMessage::Text(m))
+        let packet = deserialize(EngineMessage::Text(m.to_string().into()))
             .unwrap()
             .packet()
-            .unwrap()
-            .data
-        {
-            PacketData::Event { args, .. } => args,
+            .unwrap();
+        let args = match packet.data() {
+            Data::Event { args, .. } => args,
             _ => unreachable!(),
         };
 
@@ -130,13 +129,12 @@ mod tests {
     #[test]
     fn test_text_arg_deserialize_borrowed() {
         let m = "23[\"test\",\"hello\",{\"key\":\"value\"}]";
-        let args = match deserialize(EngineMessage::Text(m))
+        let packet = deserialize(EngineMessage::Text(m.to_string().into()))
             .unwrap()
             .packet()
-            .unwrap()
-            .data
-        {
-            PacketData::Event { args, .. } => args,
+            .unwrap();
+        let args = match packet.data() {
+            Data::Event { args, .. } => args,
             _ => unreachable!(),
         };
 
@@ -157,13 +155,12 @@ mod tests {
     #[test]
     fn test_text_arg_deserialize_owned() {
         let m = "23[\"test\",\"hello\",{\"key\":\"value\"}]";
-        let args = match deserialize(EngineMessage::Text(m))
+        let packet = deserialize(EngineMessage::Text(m.to_string().into()))
             .unwrap()
             .packet()
-            .unwrap()
-            .data
-        {
-            PacketData::Event { args, .. } => args,
+            .unwrap();
+        let args = match packet.data() {
+            Data::Event { args, .. } => args,
             _ => unreachable!(),
         };
 
@@ -185,15 +182,16 @@ mod tests {
     fn test_deserialize_binary_ack() {
         let m = "61-10[\"binary\",{\"array\": {\"_placeholder\":true,\"num\":0}}]";
         let attachment = vec![222, 173, 190, 239];
-        let attachments = vec![EngineMessage::Binary(&*attachment)];
+        let attachments = vec![EngineMessage::Binary(attachment.into())];
 
-        let partial = match deserialize(EngineMessage::Text(m)).unwrap() {
+        let partial = match deserialize(EngineMessage::Text(m.to_string().into())).unwrap() {
             DeserializeResult::DataNeeded(partial) => partial,
             _ => unreachable!(),
         };
 
-        let args = match deserialize_partial(partial, attachments).unwrap().data {
-            PacketData::BinaryAck { args, .. } => args,
+        let packet = deserialize_partial(partial, attachments).unwrap();
+        let args = match packet.data() {
+            Data::Ack { args, .. } => args,
             _ => unreachable!(),
         };
 
