@@ -1,5 +1,6 @@
 use std::fmt;
 
+use owned_subslice::OwnedSubslice;
 use paste::paste;
 use serde::{
     de::{
@@ -10,8 +11,6 @@ use serde::{
     Deserialize, Deserializer,
 };
 use serde_json::{Deserializer as JsonDeserializer, Error as JsonError};
-
-use super::BinaryArg;
 
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -26,19 +25,16 @@ impl DeError for Error {
     }
 }
 
-pub fn deserialize<'a, T>(arg: &BinaryArg<'a>) -> Result<T, JsonError>
+type Buffers<'a> = &'a [OwnedSubslice<Vec<u8>>];
+
+pub(super) fn deserialize<'a, T>(arg: &'a str, buffers: Buffers<'a>) -> Result<T, JsonError>
 where
     T: Deserialize<'a>,
 {
-    let mut d = JsonDeserializer::from_str(arg.0.get());
-    let deserializer = BinaryDeserializer {
-        d: &mut d,
-        buffers: arg.1,
-    };
+    let mut d = JsonDeserializer::from_str(arg);
+    let deserializer = BinaryDeserializer { d: &mut d, buffers };
     T::deserialize(deserializer)
 }
-
-type Buffers<'a> = &'a [&'a [u8]];
 
 enum AccessType {
     Bytes,
@@ -308,7 +304,7 @@ where
                 ))
             })?;
             match self.access_type {
-                AccessType::Bytes => self.visitor.visit_borrowed_bytes(buffer),
+                AccessType::Bytes => self.visitor.visit_borrowed_bytes(&*buffer),
                 AccessType::Seq | AccessType::Neither => self
                     .visitor
                     .visit_seq(SeqDeserializer::new(buffer.iter().copied())),
