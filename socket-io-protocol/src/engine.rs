@@ -2,27 +2,29 @@ use serde::{Deserialize, Serialize};
 use serde_json::error::Error as JsonError;
 use tungstenite::Message as WsMessage;
 
-#[derive(Debug, PartialEq)]
-pub enum Packet<'a> {
-    Open(Open<'a>),
+use owned_subslice::OwnedSubslice;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Packet {
+    Open(Open),
     Close,
     Ping,
     Pong,
-    Message(Message<'a>),
+    Message(Message),
 }
 
-#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct Open<'a> {
-    sid: &'a str,
+pub struct Open {
+    sid: String,
     ping_timeout: u64,
     ping_interval: u64,
 }
 
-#[derive(Debug, PartialEq)]
-pub enum Message<'a> {
-    Text(&'a str),
-    Binary(&'a [u8]),
+#[derive(Debug, Clone, PartialEq)]
+pub enum Message {
+    Text(OwnedSubslice<String>),
+    Binary(OwnedSubslice<Vec<u8>>),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -66,7 +68,7 @@ impl Decoder {
         Default::default()
     }
 
-    pub fn decode<'a>(&mut self, msg: &'a WsMessage) -> Result<Packet<'a>, Error> {
+    pub fn decode(&mut self, msg: WsMessage) -> Result<Packet, Error> {
         use WsMessage::*;
         if self.state == State::Closed {
             return Err(Error::MessageAfterClose);
@@ -74,11 +76,11 @@ impl Decoder {
         match msg {
             Ping(_) | Pong(_) | Close(_) => Err(Error::WrongMessageType(msg.clone())),
             Text(text) => self.decode_text(text),
-            Binary(data) => self.decode_binary(&*data),
+            Binary(data) => self.decode_binary(data),
         }
     }
 
-    fn decode_text<'a>(&mut self, text: &'a str) -> Result<Packet<'a>, Error> {
+    fn decode_text(&mut self, text: String) -> Result<Packet, Error> {
         let invalid_msg = || Error::InvalidMessage(WsMessage::Text(text.to_string()));
         let typ = text.as_bytes().first().ok_or_else(invalid_msg)?;
         match *typ as char {
@@ -113,24 +115,34 @@ impl Decoder {
                     Ok(Packet::Pong)
                 }
             }
-            '4' => Ok(Packet::Message(Message::Text(&text[1..]))),
+            '4' => {
+                let len = text.len();
+                Ok(Packet::Message(Message::Text(OwnedSubslice::new(
+                    text,
+                    1..len,
+                ))))
+            }
             _ => Err(invalid_msg()),
         }
     }
 
-    fn decode_binary<'a>(&mut self, data: &'a [u8]) -> Result<Packet<'a>, Error> {
+    fn decode_binary(&mut self, data: Vec<u8>) -> Result<Packet, Error> {
         let invalid_msg = || Error::InvalidMessage(WsMessage::Binary(data.to_vec()));
         if self.state == State::Initial {
             Err(Error::MessageBeforeOpen)
-        } else if *data.first().ok_or_else(invalid_msg)? != 4 {
+        } else if *data.get(0).ok_or_else(invalid_msg)? != 4 {
             Err(invalid_msg())
         } else {
-            Ok(Packet::Message(Message::Binary(&data[1..])))
+            let len = data.len();
+            Ok(Packet::Message(Message::Binary(OwnedSubslice::new(
+                data,
+                1..len,
+            ))))
         }
     }
 }
 
-fn parse_open<'a>(text: &'a str) -> Result<Open<'a>, Error> {
+fn parse_open(text: &str) -> Result<Open, Error> {
     Ok(serde_json::from_str(text)?)
 }
 
@@ -142,7 +154,7 @@ mod tests {
     fn decode_close() {
         let mut decoder = Decoder::new();
 
-        assert!(decoder.decode(&WsMessage::Close(None)).is_err());
+        assert!(decoder.decode(WsMessage::Close(None)).is_err());
     }
 
     #[test]
@@ -151,14 +163,14 @@ mod tests {
 
         let msg = WsMessage::Text(
             "0{\"sid\":\"0vtWsEAcESDOoPs8AAAA\",\"upgrades\":[],\"pingInterval\":25000,\"pingTimeout\":5000}".to_string());
-        let packet = decoder.decode(&msg).unwrap();
+        let packet = decoder.decode(msg.clone()).unwrap();
         let expected = Packet::Open(Open {
-            sid: "0vtWsEAcESDOoPs8AAAA",
+            sid: String::from("0vtWsEAcESDOoPs8AAAA"),
             ping_interval: 25000,
             ping_timeout: 5000,
         });
         assert_eq!(packet, expected);
-        let result = decoder.decode(&msg);
+        let result = decoder.decode(msg);
         assert!(result.is_err());
     }
 }

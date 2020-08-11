@@ -1,11 +1,16 @@
+use owned_subslice::OwnedSubslice;
 use serde::Deserialize;
 use serde_json::{value::Value, Error as JsonError};
 
 use super::*;
 
-mod deserialize;
+mod deserialize_attachments;
 
-use deserialize::Error as DeserializeError;
+#[derive(Debug, Clone)]
+pub struct Arg<'a> {
+    arg: &'a str,
+    attachments: &'a [OwnedSubslice<Vec<u8>>],
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -15,83 +20,49 @@ pub enum Error {
     PlaceholderIndexOutOfRange(u64, u64),
     #[error("Error deserializing json: {0}, {1}")]
     JsonError(String, JsonError),
-    #[error("Error deserializing binary arguments: {0}")]
-    BinaryError(#[from] DeserializeError),
 }
-
-pub trait Arg<'a> {
-    fn to_json_value(&self) -> Result<Value, Error>;
-
-    fn deserialize<T>(&self) -> Result<T, Error>
-    where
-        T: Deserialize<'a>;
-}
-
-pub struct TextArg<'a>(&'a Cow<'a, RawValue>);
-pub struct BinaryArg<'a>(&'a Cow<'a, RawValue>, &'a [&'a [u8]]);
 
 impl<'a> Args<'a> {
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    pub fn get<'b>(&'b self, idx: usize) -> Option<TextArg<'b>>
-    where
-        'a: 'b,
-    {
-        self.0.get(idx).map(|x| TextArg(x))
-    }
-}
-
-impl<'a> BinaryArgs<'a> {
     pub fn len(&self) -> usize {
         self.args.len()
     }
 
-    pub fn get<'b>(&'b self, idx: usize) -> Option<BinaryArg<'b>>
-    where
-        'a: 'b,
-    {
-        self.args
-            .0
-            .get(idx)
-            .map(|x| BinaryArg(x, self.buffers.as_slice()))
+    pub fn get(&self, idx: usize) -> Option<Arg<'a>> {
+        self.args.get(idx).map(|range| Arg {
+            arg: &self.message[range.clone()],
+            attachments: self.attachments,
+        })
     }
 }
 
-impl<'a> Arg<'a> for TextArg<'a> {
-    fn to_json_value(&self) -> Result<Value, Error> {
-        // We can unwrap because if the json was going to fail to deserialize we wouldn't have
-        // gotten a RawValue
-        Ok(serde_json::from_str(self.0.get()).unwrap())
+impl<'a> Arg<'a> {
+    pub fn to_json_value(&self) -> Result<Value, Error> {
+        // We can unwrap because if the json was going to fail to deserialize we would have failed
+        // to parse
+        let mut value = serde_json::from_str(self.arg).unwrap();
+        if self.attachments.len() > 0 {
+            fill_placeholders_value(&mut value, &self.attachments)?;
+        }
+        Ok(value)
     }
 
-    fn deserialize<T>(&self) -> Result<T, Error>
-    where
-        T: Deserialize<'a>,
-    {
-        serde_json::from_str(self.0.get())
-            .map_err(|err| Error::JsonError(self.0.get().to_string(), err))
-    }
-}
-
-impl<'a> Arg<'a> for BinaryArg<'a> {
-    fn to_json_value(&self) -> Result<Value, Error> {
-        let mut json = serde_json::from_str(self.0.get()).unwrap();
-        fill_placeholders_value(&mut json, self.1)?;
-        Ok(json)
-    }
-
-    fn deserialize<T>(&self) -> Result<T, Error>
+    pub fn deserialize<T>(&self) -> Result<T, Error>
     where
         T: Deserialize<'a>,
     {
-        deserialize::deserialize(self)
-            .map_err(|err| Error::JsonError(format!("({:?}, {:?})", self.0.get(), self.1), err))
+        (if self.attachments.len() > 0 {
+            deserialize_attachments::deserialize(self.arg, self.attachments)
+        } else {
+            serde_json::from_str(self.arg)
+        })
+        .map_err(|err| Error::JsonError(self.arg.to_string(), err))
     }
 }
 
-fn fill_placeholders_value(value: &mut Value, buffers: &[&[u8]]) -> Result<(), Error> {
+fn fill_placeholders_value(
+    value: &mut Value,
+    buffers: &[OwnedSubslice<Vec<u8>>],
+) -> Result<(), Error> {
     use Value::*;
 
     let idx = match value {
@@ -130,13 +101,12 @@ mod tests {
     #[test]
     fn test_text_arg_value() {
         let m = "23[\"test\",\"hello\",{\"key\":\"value\"}]";
-        let args = match deserialize(EngineMessage::Text(m))
+        let packet = deserialize(EngineMessage::Text(m.to_string().into()))
             .unwrap()
             .packet()
-            .unwrap()
-            .data
-        {
-            PacketData::Event { args, .. } => args,
+            .unwrap();
+        let args = match packet.data() {
+            Data::Event { args, .. } => args,
             _ => unreachable!(),
         };
 
@@ -159,13 +129,12 @@ mod tests {
     #[test]
     fn test_text_arg_deserialize_borrowed() {
         let m = "23[\"test\",\"hello\",{\"key\":\"value\"}]";
-        let args = match deserialize(EngineMessage::Text(m))
+        let packet = deserialize(EngineMessage::Text(m.to_string().into()))
             .unwrap()
             .packet()
-            .unwrap()
-            .data
-        {
-            PacketData::Event { args, .. } => args,
+            .unwrap();
+        let args = match packet.data() {
+            Data::Event { args, .. } => args,
             _ => unreachable!(),
         };
 
@@ -186,13 +155,12 @@ mod tests {
     #[test]
     fn test_text_arg_deserialize_owned() {
         let m = "23[\"test\",\"hello\",{\"key\":\"value\"}]";
-        let args = match deserialize(EngineMessage::Text(m))
+        let packet = deserialize(EngineMessage::Text(m.to_string().into()))
             .unwrap()
             .packet()
-            .unwrap()
-            .data
-        {
-            PacketData::Event { args, .. } => args,
+            .unwrap();
+        let args = match packet.data() {
+            Data::Event { args, .. } => args,
             _ => unreachable!(),
         };
 
@@ -214,15 +182,16 @@ mod tests {
     fn test_deserialize_binary_ack() {
         let m = "61-10[\"binary\",{\"array\": {\"_placeholder\":true,\"num\":0}}]";
         let attachment = vec![222, 173, 190, 239];
-        let attachments = vec![EngineMessage::Binary(&*attachment)];
+        let attachments = vec![EngineMessage::Binary(attachment.into())];
 
-        let partial = match deserialize(EngineMessage::Text(m)).unwrap() {
+        let partial = match deserialize(EngineMessage::Text(m.to_string().into())).unwrap() {
             DeserializeResult::DataNeeded(partial) => partial,
             _ => unreachable!(),
         };
 
-        let args = match deserialize_partial(partial, attachments).unwrap().data {
-            PacketData::BinaryAck { args, .. } => args,
+        let packet = deserialize_partial(partial, attachments).unwrap();
+        let args = match packet.data() {
+            Data::Ack { args, .. } => args,
             _ => unreachable!(),
         };
 
