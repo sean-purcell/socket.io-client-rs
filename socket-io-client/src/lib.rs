@@ -403,6 +403,7 @@ mod tests {
         spawn.block_on(test);
     }
 
+    /*
     #[test]
     fn test_close() {
         init_log();
@@ -440,6 +441,7 @@ mod tests {
 
         spawn.block_on(test);
     }
+    */
 
     #[test]
     fn test_parse_url() {
