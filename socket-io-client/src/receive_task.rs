@@ -7,8 +7,8 @@ use futures::{
 };
 
 use socket_io_protocol::{
-    engine::{Decoder, Error as EngineError, Packet},
-    socket::{self, Error as SocketError},
+    engine::{Decoder, Error as EngineError, Message as EngineMessage, Packet as EnginePacket},
+    socket::{self, DeserializeResult, Error as SocketError, Packet, Partial},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -19,33 +19,60 @@ pub enum Error {
     SocketError(#[from] SocketError),
 }
 
+struct InProgress {
+    partial: Partial,
+    attachments: Vec<EngineMessage>,
+}
+
 pub fn receive_task(
     mut receiver: mpsc::UnboundedReceiver<WsMessage>,
     _sender: mpsc::UnboundedSender<WsMessage>,
     spawn: &impl Spawn,
 ) -> Result<RemoteHandle<Result<(), Error>>, SpawnError> {
-    let task = async move {
+    let processing = async move {
         let mut decoder = Decoder::new();
+
+        let mut in_progress: Option<InProgress> = None;
+
+        let log_packet = |packet| {
+            log::info!("Received packet: {}", packet);
+        };
 
         let mut process_message = |msg| {
             let packet = decoder.decode(msg)?;
             match packet {
-                Packet::Open(open) => {
+                EnginePacket::Open(open) => {
                     // TODO: forward this info to the client
                     log::info!("Received open packet: {:?}", open);
                 }
-                Packet::Close => {
+                EnginePacket::Close => {
                     log::info!("Received close");
                 }
-                Packet::Ping => {
+                EnginePacket::Ping => {
                     // TODO: send pong when we have a serializer
                 }
-                Packet::Pong => {
+                EnginePacket::Pong => {
                     // TODO: send message to timer task to reset the timeout
                 }
-                Packet::Message(msg) => {
-                    let result = socket::deserialize(msg)?;
-                    log::info!("Received message packet: {:?}", result);
+                EnginePacket::Message(msg) => {
+                    log::info!("Received message packet: {:?}", msg);
+                    match in_progress.take() {
+                        Some(mut ip) => {
+                            ip.add(msg);
+                            if ip.ready() {
+                                let packet = ip.deserialize()?;
+                                log_packet(packet);
+                            } else {
+                                in_progress = Some(ip);
+                            }
+                        }
+                        None => match socket::deserialize(msg)? {
+                            DeserializeResult::Packet(packet) => log_packet(packet),
+                            DeserializeResult::DataNeeded(partial) => {
+                                in_progress = Some(InProgress::new(partial));
+                            }
+                        },
+                    }
                 }
             }
             let result: Result<(), Error> = Ok(());
@@ -68,6 +95,36 @@ pub fn receive_task(
         Ok(())
     };
 
+    let task = async move {
+        let result = processing.await;
+        match &result {
+            Ok(()) => (),
+            Err(e) => log::error!("Error occurred in processing task: {}", e),
+        }
+        result
+    };
+
     let handle = spawn.spawn_with_handle(task)?;
     Ok(handle)
+}
+
+impl InProgress {
+    fn new(partial: Partial) -> Self {
+        InProgress {
+            partial,
+            attachments: Vec::new(),
+        }
+    }
+
+    fn add(&mut self, msg: EngineMessage) {
+        self.attachments.push(msg);
+    }
+
+    fn ready(&self) -> bool {
+        self.partial.attachments() == self.attachments.len() as u64
+    }
+
+    fn deserialize(self) -> Result<Packet, SocketError> {
+        socket::deserialize_partial(self.partial, self.attachments)
+    }
 }
