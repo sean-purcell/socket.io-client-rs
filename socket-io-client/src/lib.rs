@@ -18,12 +18,14 @@ use futures::{
 };
 use url::Url;
 
-mod receive_task;
+mod receiver;
+
+use receiver::Receiver;
 
 pub struct Client {
     pub send: mpsc::UnboundedSender<WsMessage>,
     close_handle: Option<(oneshot::Sender<()>, RemoteHandle<Result<(), Error>>)>,
-    _receive_handle: RemoteHandle<Result<(), receive_task::Error>>,
+    _receiver: Receiver,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -102,12 +104,12 @@ impl Client {
 
         let (send, receive, close, handle) = process_websocket(stream, spawn).await?;
 
-        let _receive_handle = receive_task::receive_task(receive, send.clone(), spawn)?;
+        let _receiver = Receiver::new(receive, send.clone(), spawn)?;
 
         Ok(Client {
             send,
             close_handle: Some((close, handle)),
-            _receive_handle,
+            _receiver,
         })
     }
 

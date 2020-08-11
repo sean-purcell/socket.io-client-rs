@@ -19,9 +19,24 @@ pub enum Error {
     SocketError(#[from] SocketError),
 }
 
+pub struct Receiver {
+    _handle: RemoteHandle<Result<(), Error>>,
+}
+
 struct InProgress {
     partial: Partial,
     attachments: Vec<EngineMessage>,
+}
+
+impl Receiver {
+    pub fn new(
+        receiver: mpsc::UnboundedReceiver<WsMessage>,
+        sender: mpsc::UnboundedSender<WsMessage>,
+        spawn: &impl Spawn,
+    ) -> Result<Receiver, SpawnError> {
+        let _handle = receive_task(receiver, sender, spawn)?;
+        Ok(Receiver { _handle })
+    }
 }
 
 pub fn receive_task(
