@@ -1,3 +1,4 @@
+use std::fmt;
 use std::ops::Range;
 
 use owned_subslice::OwnedSubslice;
@@ -8,7 +9,7 @@ use super::engine::Message as EngineMessage;
 mod args;
 mod parse;
 
-pub use args::Arg;
+pub use args::{Arg, Args};
 pub use parse::{deserialize, deserialize_partial, DeserializeResult, Partial};
 
 #[derive(Debug)]
@@ -36,13 +37,6 @@ pub enum Data<'a> {
     Disconnect,
     Event { id: Option<u64>, args: Args<'a> },
     Ack { id: u64, args: Args<'a> },
-}
-
-#[derive(Debug, Clone)]
-pub struct Args<'a> {
-    message: &'a str,
-    args: &'a [Range<usize>],
-    attachments: &'a [OwnedSubslice<Vec<u8>>],
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -88,6 +82,24 @@ impl Packet {
             message: &*self.message,
             args: self.args.as_slice(),
             attachments: self.attachments.as_slice(),
+        }
+    }
+}
+
+impl fmt::Display for Packet {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.data())
+    }
+}
+
+impl<'a> fmt::Display for Data<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use Data::*;
+        match self {
+            Connect => write!(f, "Connect"),
+            Disconnect => write!(f, "Disconnect"),
+            Event { id, args } => write!(f, "Event {{ id: {:?}, args: {} }}", id, args),
+            Ack { id, args } => write!(f, "Ack {{ id: {:?}, args: {} }}", id, args),
         }
     }
 }

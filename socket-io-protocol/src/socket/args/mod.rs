@@ -1,3 +1,5 @@
+use std::fmt;
+
 use owned_subslice::OwnedSubslice;
 use serde::Deserialize;
 use serde_json::{value::Value, Error as JsonError};
@@ -7,9 +9,21 @@ use super::*;
 mod deserialize_attachments;
 
 #[derive(Debug, Clone)]
+pub struct Args<'a> {
+    pub(super) message: &'a str,
+    pub(super) args: &'a [Range<usize>],
+    pub(super) attachments: &'a [OwnedSubslice<Vec<u8>>],
+}
+
+#[derive(Debug, Clone)]
 pub struct Arg<'a> {
     arg: &'a str,
     attachments: &'a [OwnedSubslice<Vec<u8>>],
+}
+
+struct ArgsIter<'a> {
+    args: &'a Args<'a>,
+    idx: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -32,6 +46,10 @@ impl<'a> Args<'a> {
             arg: &self.message[range.clone()],
             attachments: self.attachments,
         })
+    }
+
+    pub fn iter<'b>(&'b self) -> impl Iterator<Item = Arg<'b>> {
+        ArgsIter { args: self, idx: 0 }
     }
 }
 
@@ -92,6 +110,37 @@ fn fill_placeholders_value(
         .ok_or_else(|| Error::PlaceholderIndexOutOfRange(idx, buffers.len() as u64))?;
     *value = Value::Array(buffer.iter().copied().map(|x| x.into()).collect());
     Ok(())
+}
+
+impl<'a> Iterator for ArgsIter<'a> {
+    type Item = Arg<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let item = self.args.get(self.idx);
+        self.idx += 1;
+        item
+    }
+}
+
+impl<'a> fmt::Display for Args<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "[")?;
+        let mut first = true;
+        for arg in self.iter() {
+            if !first {
+                write!(f, ", ")?;
+            }
+            first = false;
+            write!(f, "{}", arg)?;
+        }
+        write!(f, "]")
+    }
+}
+
+impl<'a> fmt::Display for Arg<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.to_json_value().unwrap())
+    }
 }
 
 #[cfg(test)]
