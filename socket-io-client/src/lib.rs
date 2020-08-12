@@ -18,6 +18,7 @@ use futures::{
 };
 use url::Url;
 
+mod callbacks;
 mod receiver;
 
 use receiver::Receiver;
