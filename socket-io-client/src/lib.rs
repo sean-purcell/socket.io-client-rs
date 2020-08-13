@@ -1,6 +1,9 @@
 #![recursion_limit = "1024"] // Needed for select
 
-use std::error::Error as StdError;
+use std::{
+    error::Error as StdError,
+    sync::{Arc, Mutex},
+};
 
 use async_tungstenite::{
     async_tls,
@@ -21,11 +24,14 @@ use url::Url;
 mod callbacks;
 mod receiver;
 
+pub use callbacks::Callback;
+use callbacks::Callbacks;
 use receiver::Receiver;
 
 pub struct Client {
     pub send: mpsc::UnboundedSender<WsMessage>,
     close_handle: Option<(oneshot::Sender<()>, RemoteHandle<Result<(), Error>>)>,
+    callbacks: Arc<Mutex<Callbacks>>,
     _receiver: Receiver,
 }
 
@@ -51,6 +57,41 @@ pub enum UrlError {
     InvalidScheme(String),
     #[error("No host")]
     NoHost,
+}
+
+macro_rules! fwd_cbs {
+    ($(#[$attrs:meta])* $n1:ident $n2:ident $tgt:ident $inv:expr, ($($arg:ident : $ty:ty),*)) => {
+        paste::paste! {
+            $(#[$attrs])*
+            pub fn $n1(
+                &mut self,
+                namespace: &str,
+                $( $arg : $ty ),*
+            ) {
+                self.callbacks.lock().unwrap().$tgt(namespace, $( $arg ),*)
+            }
+
+            #[doc = "Equivalent to `"]
+            #[doc = $inv]
+            #[doc = "`."]
+            pub fn $n2(&mut self, $( $arg : $ty ),*) {
+                self.$n1("/", $( $arg ),*)
+            }
+        }
+    };
+
+    ($(#[$attrs:meta])* $fn1:ident $fn2:ident ($($arg:ident : $ty:ty),*)) => {
+            paste::paste! {
+        fwd_cbs! {
+                $(#[$attrs])*
+                [<$fn1 _namespace_ $fn2 _callback>]
+                [<$fn1 _ $fn2 _callback>]
+                [<$fn1 _ $fn2>]
+                stringify!( [<$fn1 _namespace_ $fn2 _callback>] ("/", $($arg),*) ),
+                ($($arg : $ty),*)
+            }
+        }
+    };
 }
 
 pub type Host = String;
@@ -105,11 +146,14 @@ impl Client {
 
         let (send, receive, close, handle) = process_websocket(stream, spawn).await?;
 
+        let callbacks = Arc::new(Mutex::new(Callbacks::new()));
+
         let _receiver = Receiver::new(receive, send.clone(), spawn)?;
 
         Ok(Client {
             send,
             close_handle: Some((close, handle)),
+            callbacks,
             _receiver,
         })
     }
@@ -119,6 +163,25 @@ impl Client {
 
         let _ = close.send(());
         handle.await
+    }
+
+    fwd_cbs! {
+        /// Set the callback for messages received to this namespace and event.
+        set event(event: &str, callback: impl Into<Callback>)
+    }
+    fwd_cbs! {
+        /// Clears any callback set for messages received to this namespace and event,
+        /// any messages will be routed to the fallback callback if there is one.
+        clear event(event: &str)
+    }
+    fwd_cbs! {
+        /// Set the fallback callback for this namespace, which will be called for messages for any
+        /// event without a callback set.
+        set fallback(callback: impl Into<Callback>)
+    }
+    fwd_cbs! {
+        /// Clears the fallback callback for this namespace.
+        clear fallback()
     }
 }
 
