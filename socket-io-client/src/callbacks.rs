@@ -1,16 +1,23 @@
-#![allow(dead_code)]
-
-use std::{collections::HashMap, rc::Rc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 use socket_io_protocol::socket::Args;
 
 // TODO: Is there a cleaner way to do this?
-pub type Callback = Rc<
-    dyn 'static
-        + for<'a> Fn(
-            &'a Args<'a>, // TODO: Add ack callback here once sending exists
-        ),
->;
+#[derive(Clone)]
+pub struct Callback(
+    Arc<
+        Mutex<
+            dyn 'static
+                + for<'a> FnMut(
+                    &'a Args<'a>, // TODO: Add ack callback here once sending exists
+                )
+                + Send,
+        >,
+    >,
+);
 
 pub struct Callbacks {
     namespaces: HashMap<String, Namespace>,
@@ -22,6 +29,28 @@ struct Namespace {
     acks: HashMap<u64, Callback>,
 }
 
+impl<F> From<F> for Callback
+where
+    F: 'static + for<'a> FnMut(&'a Args<'a>) + Send,
+{
+    fn from(f: F) -> Callback {
+        Callback(Arc::new(Mutex::new(f)))
+    }
+}
+
+impl From<Arc<Mutex<dyn 'static + for<'a> FnMut(&'a Args<'a>) + Send>>> for Callback {
+    fn from(a: Arc<Mutex<dyn 'static + for<'a> FnMut(&'a Args<'a>) + Send>>) -> Callback {
+        Callback(a)
+    }
+}
+
+impl Callback {
+    pub fn call<'a>(&self, args: &'a Args<'a>) {
+        let mut guard = self.0.lock().unwrap();
+        (&mut *guard)(args)
+    }
+}
+
 impl Callbacks {
     pub fn new() -> Self {
         Callbacks {
@@ -31,7 +60,10 @@ impl Callbacks {
 
     pub fn get_event(&self, namespace: &str, event: &str) -> Option<Callback> {
         let ns = self.namespaces.get(namespace)?;
-        ns.events.get(event).or(ns.fallback.as_ref()).map(Rc::clone)
+        ns.events
+            .get(event)
+            .or(ns.fallback.as_ref())
+            .map(Callback::clone)
     }
 
     pub fn set_event(&mut self, namespace: &str, event: &str, callback: impl Into<Callback>) {
@@ -92,25 +124,25 @@ mod tests {
     fn test_simple() {
         let mut callbacks = Callbacks::new();
 
-        let c0: Callback = Rc::new(|_| {});
-        let c1: Callback = Rc::new(|_| {});
-        let c2: Callback = Rc::new(|_| {});
+        let c0: Callback = (|_args: &Args| {}).into();
+        let c1: Callback = (|_args: &Args| {}).into();
+        let c2: Callback = (|_args: &Args| {}).into();
         callbacks.set_event("/", "msg", c0.clone());
         callbacks.set_fallback("/", c1.clone());
         callbacks.set_ack("/", 0, c2.clone());
 
-        assert!(Rc::ptr_eq(
-            callbacks.get_event("/", "msg").as_ref().unwrap(),
-            &c0
+        assert!(Arc::ptr_eq(
+            &callbacks.get_event("/", "msg").as_ref().unwrap().0,
+            &c0.0
         ));
-        assert!(Rc::ptr_eq(
-            callbacks.get_event("/", "other").as_ref().unwrap(),
-            &c1
+        assert!(Arc::ptr_eq(
+            &callbacks.get_event("/", "other").as_ref().unwrap().0,
+            &c1.0
         ));
         assert!(callbacks.get_event("/ns", "msg").is_none());
-        assert!(Rc::ptr_eq(
-            callbacks.get_and_clear_ack("/", 0).as_ref().unwrap(),
-            &c2
+        assert!(Arc::ptr_eq(
+            &callbacks.get_and_clear_ack("/", 0).as_ref().unwrap().0,
+            &c2.0
         ));
         assert!(callbacks.get_and_clear_ack("/", 0).is_none());
     }
