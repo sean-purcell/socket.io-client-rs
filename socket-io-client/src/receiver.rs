@@ -1,7 +1,12 @@
+use std::{
+    fmt,
+    sync::{Arc, Mutex},
+};
+
 use async_tungstenite::tungstenite::Message as WsMessage;
 use futures::{
     channel::mpsc,
-    future::RemoteHandle,
+    future::{Future, RemoteHandle},
     stream::StreamExt,
     task::{Spawn, SpawnError, SpawnExt},
 };
@@ -34,93 +39,93 @@ impl Receiver {
         sender: mpsc::UnboundedSender<WsMessage>,
         spawn: &impl Spawn,
     ) -> Result<Receiver, SpawnError> {
-        let _handle = receive_task(receiver, sender, spawn)?;
+        let _handle =
+            spawn.spawn_with_handle(log_errors(receive_task(receiver, sender)))?;
         Ok(Receiver { _handle })
     }
 }
 
-pub fn receive_task(
+async fn log_errors<F, T, E>(f: F) -> Result<T, E>
+where
+    F: 'static + Future<Output = Result<T, E>> + Send,
+    E: fmt::Display,
+{
+    match f.await {
+        Ok(value) => Ok(value),
+        Err(err) => {
+            log::error!("Error occurred in receiver task: {}", err);
+            Err(err)
+        }
+    }
+}
+
+async fn receive_task(
     mut receiver: mpsc::UnboundedReceiver<WsMessage>,
     _sender: mpsc::UnboundedSender<WsMessage>,
-    spawn: &impl Spawn,
-) -> Result<RemoteHandle<Result<(), Error>>, SpawnError> {
-    let processing = async move {
-        let mut decoder = Decoder::new();
+) -> Result<(), Error> {
+    let mut decoder = Decoder::new();
 
-        let mut in_progress: Option<InProgress> = None;
+    let mut in_progress: Option<InProgress> = None;
 
-        let log_packet = |packet| {
-            log::info!("Received packet: {}", packet);
-        };
-
-        let mut process_message = |msg| {
-            let packet = decoder.decode(msg)?;
-            match packet {
-                EnginePacket::Open(open) => {
-                    // TODO: forward this info to the client
-                    log::info!("Received open packet: {:?}", open);
-                }
-                EnginePacket::Close => {
-                    log::info!("Received close");
-                }
-                EnginePacket::Ping => {
-                    // TODO: send pong when we have a serializer
-                }
-                EnginePacket::Pong => {
-                    // TODO: send message to timer task to reset the timeout
-                }
-                EnginePacket::Message(msg) => {
-                    log::info!("Received message packet: {:?}", msg);
-                    match in_progress.take() {
-                        Some(mut ip) => {
-                            ip.add(msg);
-                            if ip.ready() {
-                                let packet = ip.deserialize()?;
-                                log_packet(packet);
-                            } else {
-                                in_progress = Some(ip);
-                            }
-                        }
-                        None => match socket::deserialize(msg)? {
-                            DeserializeResult::Packet(packet) => log_packet(packet),
-                            DeserializeResult::DataNeeded(partial) => {
-                                in_progress = Some(InProgress::new(partial));
-                            }
-                        },
-                    }
-                }
-            }
-            let result: Result<(), Error> = Ok(());
-            result
-        };
-
-        while let Some(msg) = receiver.next().await {
-            log::info!("message received: {:?}", msg);
-            match msg {
-                WsMessage::Close(frame) => {
-                    log::debug!("Closed with close frame {:?}", frame);
-                    return Ok(());
-                }
-                WsMessage::Ping(_) | WsMessage::Pong(_) => (), // handled at a lower layer
-                WsMessage::Text(text) => process_message(WsMessage::Text(text))?,
-                WsMessage::Binary(data) => process_message(WsMessage::Binary(data))?,
-            }
-        }
-
-        Ok(())
+    let process_packet = |packet| {
+        log::info!("Received packet: {}", packet);
     };
 
-    let task = async move {
-        let result = processing.await;
-        match &result {
-            Ok(()) => (),
-            Err(e) => log::error!("Error occurred in processing task: {}", e),
+    let mut process_message = |msg| {
+        let packet = decoder.decode(msg)?;
+        match packet {
+            EnginePacket::Open(open) => {
+                // TODO: forward this info to the client
+                log::info!("Received open packet: {:?}", open);
+            }
+            EnginePacket::Close => {
+                log::info!("Received close");
+            }
+            EnginePacket::Ping => {
+                // TODO: send pong when we have a serializer
+            }
+            EnginePacket::Pong => {
+                // TODO: send message to timer task to reset the timeout
+            }
+            EnginePacket::Message(msg) => {
+                log::info!("Received message packet: {:?}", msg);
+                match in_progress.take() {
+                    Some(mut ip) => {
+                        ip.add(msg);
+                        if ip.ready() {
+                            let packet = ip.deserialize()?;
+                            process_packet(packet);
+                        } else {
+                            in_progress = Some(ip);
+                        }
+                    }
+                    None => match socket::deserialize(msg)? {
+                        DeserializeResult::Packet(packet) => process_packet(packet),
+                        DeserializeResult::DataNeeded(partial) => {
+                            in_progress = Some(InProgress::new(partial));
+                        }
+                    },
+                }
+            }
         }
+        let result: Result<(), Error> = Ok(());
         result
     };
 
-    let handle = spawn.spawn_with_handle(task)?;
-    Ok(handle)
+    while let Some(msg) = receiver.next().await {
+        log::info!("message received: {:?}", msg);
+        match msg {
+            WsMessage::Close(frame) => {
+                log::debug!("Closed with close frame {:?}", frame);
+                return Ok(());
+            }
+            WsMessage::Ping(_) | WsMessage::Pong(_) => (), // handled at a lower layer
+            WsMessage::Text(text) => process_message(WsMessage::Text(text))?,
+            WsMessage::Binary(data) => process_message(WsMessage::Binary(data))?,
+        }
+    }
+
+    Ok(())
 }
 
 impl InProgress {
