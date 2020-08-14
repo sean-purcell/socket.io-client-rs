@@ -6,18 +6,40 @@ use std::{
 use socket_io_protocol::socket::Args;
 
 // TODO: Is there a cleaner way to do this?
-#[derive(Clone)]
-pub struct Callback(
-    Arc<
-        Mutex<
-            dyn 'static
-                + for<'a> FnMut(
-                    &'a Args<'a>, // TODO: Add ack callback here once sending exists
-                )
-                + Send,
-        >,
-    >,
-);
+macro_rules! impl_callback {
+    ($(#[$attr:meta])* $name:ident ( $($arg:ident : $ty:ty),* )) => {
+        $(#[$attr])*
+        #[derive(Clone)]
+        pub struct $name(Arc<Mutex<dyn 'static + Send + FnMut($($ty),*)>>);
+
+        impl $name {
+            pub fn call(&mut self, $($arg : $ty),*) {
+                (&*self.0.lock().unwrap())($($arg),*)
+            }
+        }
+
+        impl<F> From<F> for $name
+        where
+            F: 'static + Send + FnMut($($ty),*)
+        {
+            fn from(f: F) -> Self {
+                $name(Arc::new(Mutex::new(f)))
+            }
+        }
+
+        #[cfg(test)]
+        impl From<Arc<Mutex<dyn 'static + Send + FnMut($($ty),*)>>> for $name {
+            fn from(a: Arc<Mutex<dyn 'static + Send + FnMut($($ty),*)>>) -> Self {
+                $name(a)
+            }
+        }
+    }
+}
+
+impl_callback! {
+    /// A wrapper type for event callbacks.
+    Callback(args: &Args)
+}
 
 pub struct Callbacks {
     namespaces: HashMap<String, Namespace>,
@@ -27,28 +49,6 @@ struct Namespace {
     fallback: Option<Callback>,
     events: HashMap<String, Callback>,
     acks: HashMap<u64, Callback>,
-}
-
-impl<F> From<F> for Callback
-where
-    F: 'static + for<'a> FnMut(&'a Args<'a>) + Send,
-{
-    fn from(f: F) -> Callback {
-        Callback(Arc::new(Mutex::new(f)))
-    }
-}
-
-impl From<Arc<Mutex<dyn 'static + for<'a> FnMut(&'a Args<'a>) + Send>>> for Callback {
-    fn from(a: Arc<Mutex<dyn 'static + for<'a> FnMut(&'a Args<'a>) + Send>>) -> Callback {
-        Callback(a)
-    }
-}
-
-impl Callback {
-    pub fn call<'a>(&self, args: &'a Args<'a>) {
-        let mut guard = self.0.lock().unwrap();
-        (&mut *guard)(args)
-    }
 }
 
 impl Callbacks {
