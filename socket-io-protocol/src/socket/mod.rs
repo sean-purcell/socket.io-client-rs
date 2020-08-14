@@ -9,10 +9,10 @@ use super::engine::Message as EngineMessage;
 mod args;
 mod parse;
 
-pub use args::{Arg, Args};
+pub use args::{Arg, Args, Error as ArgsError};
 pub use parse::{deserialize, deserialize_partial, DeserializeResult, Partial};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[cfg_attr(test, derive(PartialEq))]
 pub struct Packet {
     message: OwnedSubslice<String>,

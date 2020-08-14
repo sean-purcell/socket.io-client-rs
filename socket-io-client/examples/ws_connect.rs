@@ -8,7 +8,7 @@ use futures::{
 use structopt::StructOpt;
 use tokio::{io, net::TcpStream};
 
-use socket_io_client::Client;
+use socket_io_client::{protocol, Client};
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "ws_connect")]
@@ -50,9 +50,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut client = Client::connect(opt.url, connect, &spawn).await?;
 
+    client.set_fallback_callback(|args: &protocol::socket::Args| println!("{}", args));
     let timeout = tokio::time::delay_for(Duration::from_secs(opt.timeout)).fuse();
 
     if let Some(namespace) = &opt.namespace {
+        let n2 = namespace.clone();
+        client.set_namespace_fallback_callback(namespace, move |args: &protocol::socket::Args| {
+            println!("{}: {}", n2, args)
+        });
         client
             .send
             .unbounded_send(WsMessage::Text(format!("40{},", namespace)))?;

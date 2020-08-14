@@ -14,7 +14,7 @@ macro_rules! impl_callback {
 
         impl $name {
             pub fn call(&mut self, $($arg : $ty),*) {
-                (&*self.0.lock().unwrap())($($arg),*)
+                (&mut *self.0.lock().unwrap())($($arg),*)
             }
         }
 

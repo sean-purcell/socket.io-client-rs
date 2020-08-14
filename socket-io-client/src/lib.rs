@@ -21,6 +21,8 @@ use futures::{
 };
 use url::Url;
 
+pub use socket_io_protocol as protocol;
+
 mod callbacks;
 mod receiver;
 
@@ -148,7 +150,7 @@ impl Client {
 
         let callbacks = Arc::new(Mutex::new(Callbacks::new()));
 
-        let _receiver = Receiver::new(receive, send.clone(), spawn)?;
+        let _receiver = Receiver::new(receive, send.clone(), callbacks.clone(), spawn)?;
 
         Ok(Client {
             send,
