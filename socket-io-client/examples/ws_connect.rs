@@ -50,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut client = Client::connect(opt.url, connect, &spawn).await?;
 
-    client.set_fallback_callback(|args: &protocol::socket::Args| println!("{}", args));
+    client.set_fallback_callback(|args: &protocol::Args| println!("{}", args));
     let timeout = tokio::time::delay_for(Duration::from_secs(opt.timeout)).fuse();
 
     if let Some(namespace) = &opt.namespace {
@@ -63,16 +63,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unbounded_send(WsMessage::Text(format!("40{},", namespace)))?;
     }
 
-    /*
-    loop {
-        select! {
-            _ = timeout => break,
-            msg = client.receive.next() => {
-                println!("{:?}", msg);
-            }
-        }
-    }
-    */
     timeout.await;
 
     client.close().await?;

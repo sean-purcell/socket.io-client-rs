@@ -21,9 +21,8 @@ use futures::{
 };
 use url::Url;
 
-pub use socket_io_protocol as protocol;
-
 mod callbacks;
+pub mod protocol;
 mod receiver;
 
 pub use callbacks::Callback;
