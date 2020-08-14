@@ -55,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(namespace) = &opt.namespace {
         let n2 = namespace.clone();
-        client.set_namespace_fallback_callback(namespace, move |args: &protocol::socket::Args| {
+        client.set_namespace_fallback_callback(namespace, move |args: &protocol::Args| {
             println!("{}: {}", n2, args)
         });
         client
