@@ -114,7 +114,7 @@ fn fill_placeholders_value(
     Ok(())
 }
 
-pub fn serialize_arg(writer: impl Write, arg: &impl Serialize) -> Result<(), Error> {
+pub fn serialize_arg(writer: impl Write, arg: &(impl Serialize + ?Sized)) -> Result<(), Error> {
     serde_json::to_writer(writer, arg).map_err(Error::JsonSerError)
 }
 

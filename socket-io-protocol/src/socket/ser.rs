@@ -46,7 +46,9 @@ impl PacketBuilder {
                 first: true,
             }
         };
-        //FIXME: Add event to parameters
+        builder
+            .serialize_arg(event)
+            .expect("Serialization of &str failed");
         builder
     }
 
@@ -80,12 +82,17 @@ impl PacketBuilder {
     /// keys.  If serialization fails, the internal state will be unchanged.
     pub fn serialize_arg<T>(&mut self, arg: &T) -> Result<(), ArgsError>
     where
-        T: Serialize,
+        T: Serialize + ?Sized,
     {
         let start_pos = self.buffer.len();
         let mut cursor = Cursor::new(&mut self.buffer);
         cursor.set_position(start_pos as u64);
-        write!(cursor, ",").unwrap();
+        if self.first {
+            write!(cursor, "[").unwrap();
+            self.first = false;
+        } else {
+            write!(cursor, ",").unwrap();
+        }
         let result = match &mut self.approach {
             Approach::Normal => args::serialize_arg(cursor, arg),
             Approach::Binary { attachments, .. } => {
@@ -102,6 +109,34 @@ impl PacketBuilder {
                 .resize_with(start_pos, || panic!("shrinking vector"));
         }
         result
+    }
+
+    pub fn finish(self) -> Vec<WsMessage> {
+        // This is safe because we've only written to this via write!, and json serialization
+        let mut s = unsafe { String::from_utf8_unchecked(self.buffer) };
+        if !self.first {
+            s.push(']');
+        }
+        match self.approach {
+            Approach::Normal => vec![WsMessage::Text(s)],
+            Approach::Binary {
+                kind,
+                namespace,
+                id,
+                mut attachments,
+            } => {
+                // Create the header
+                let mut header = serialize_header(
+                    kind,
+                    Some(attachments.len() as u64),
+                    namespace.as_ref().map(|x| x.as_str()),
+                    id,
+                );
+                header.push_str(s.as_str());
+                attachments.insert(0, WsMessage::Text(header));
+                attachments
+            }
+        }
     }
 }
 
@@ -159,5 +194,11 @@ mod tests {
             serialize_disconnect(Some("/nsp")),
             EngineMessage::Text("41/nsp,".to_string().into())
         );
+    }
+
+    #[test]
+    fn test_simple() {
+        let packet = PacketBuilder::new_event("event", None, None, false).finish();
+        assert_eq!(packet, vec![WsMessage::Text(r#"42["event"]"#.to_string())]);
     }
 }
