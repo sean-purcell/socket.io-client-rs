@@ -110,7 +110,7 @@ pub fn serialize_connect(namespace: Option<&str>) -> EngineMessage {
 }
 
 pub fn serialize_disconnect(namespace: Option<&str>) -> EngineMessage {
-    EngineMessage::Text(serialize_header(ProtocolKind::Connect, None, namespace, None).into())
+    EngineMessage::Text(serialize_header(ProtocolKind::Disconnect, None, namespace, None).into())
 }
 
 fn serialize_header(
@@ -139,4 +139,25 @@ fn serialize_header(
         write!(header, "{}", id).unwrap();
     }
     unsafe { String::from_utf8_unchecked(header) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_connect() {
+        assert_eq!(
+            serialize_connect(None),
+            EngineMessage::Text("40".to_string().into())
+        );
+    }
+
+    #[test]
+    fn test_disconnect() {
+        assert_eq!(
+            serialize_disconnect(Some("/nsp")),
+            EngineMessage::Text("41/nsp,".to_string().into())
+        );
+    }
 }
