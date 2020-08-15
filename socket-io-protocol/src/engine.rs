@@ -4,6 +4,8 @@ use tungstenite::Message as WsMessage;
 
 use owned_subslice::OwnedSubslice;
 
+pub const MESSAGE_HEADER: char = '4';
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Packet {
     Open(Open),
@@ -144,6 +146,31 @@ impl Decoder {
 
 fn parse_open(text: &str) -> Result<Open, Error> {
     Ok(serde_json::from_str(text)?)
+}
+
+/// Creates a Message packet from the given text
+pub fn encode_message(text: &str) -> WsMessage {
+    package_message(format!("{}{}", MESSAGE_HEADER, text))
+}
+
+/// Creates a message from the given text without extra copies or allocations.  The first byte in
+/// text must be equal to `MESSAGE_HEADER`, otherwise this function will panic.
+pub fn package_message(text: String) -> WsMessage {
+    assert_eq!(
+        text.as_bytes().first(),
+        Some(&(MESSAGE_HEADER as u8)),
+        "Invalid header for message: {}",
+        text
+    );
+    WsMessage::Text(text)
+}
+
+/// Creates a binary Message packet from the given data.
+pub fn encode_binary(data: &[u8]) -> WsMessage {
+    let mut vec = Vec::with_capacity(data.len() + 1);
+    vec.push(4);
+    vec.extend_from_slice(data);
+    WsMessage::Binary(vec)
 }
 
 #[cfg(test)]

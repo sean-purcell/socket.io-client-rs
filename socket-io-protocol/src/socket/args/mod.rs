@@ -1,7 +1,7 @@
-use std::fmt;
+use std::{fmt, io::Write};
 
 use owned_subslice::OwnedSubslice;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{value::Value, Error as JsonError};
 
 use super::*;
@@ -33,7 +33,9 @@ pub enum Error {
     #[error("Placeholder index out of range: {0}/{1}")]
     PlaceholderIndexOutOfRange(u64, u64),
     #[error("Error deserializing json: {0}, {1}")]
-    JsonError(String, JsonError),
+    JsonDeError(String, JsonError),
+    #[error("Error serializing object to json: {0}")]
+    JsonSerError(JsonError),
 }
 
 impl<'a> Args<'a> {
@@ -73,7 +75,7 @@ impl<'a> Arg<'a> {
         } else {
             serde_json::from_str(self.arg)
         })
-        .map_err(|err| Error::JsonError(self.arg.to_string(), err))
+        .map_err(|err| Error::JsonDeError(self.arg.to_string(), err))
     }
 }
 
@@ -110,6 +112,10 @@ fn fill_placeholders_value(
         .ok_or_else(|| Error::PlaceholderIndexOutOfRange(idx, buffers.len() as u64))?;
     *value = Value::Array(buffer.iter().copied().map(|x| x.into()).collect());
     Ok(())
+}
+
+pub fn serialize_arg(writer: impl Write, arg: &impl Serialize) -> Result<(), Error> {
+    serde_json::to_writer(writer, arg).map_err(Error::JsonSerError)
 }
 
 impl<'a> Iterator for ArgsIter<'a> {

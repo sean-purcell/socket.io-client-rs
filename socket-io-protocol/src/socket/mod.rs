@@ -7,10 +7,12 @@ use serde_json::Error as JsonError;
 use super::engine::Message as EngineMessage;
 
 mod args;
-mod parse;
+mod de;
+mod ser;
 
 pub use args::{Arg, Args, Error as ArgsError};
-pub use parse::{deserialize, deserialize_partial, DeserializeResult, Partial};
+pub use de::{deserialize, deserialize_partial, DeserializeResult, Partial};
+pub use ser::{serialize_connect, serialize_disconnect, PacketBuilder};
 
 #[derive(Debug, Clone)]
 #[cfg_attr(test, derive(PartialEq))]
@@ -55,6 +57,16 @@ pub enum Error {
     InvalidDataJson(String, JsonError),
     #[error("Wrong number of attachments provided: {0} instead of {1}")]
     InvalidAttachmentCount(u64, u64),
+}
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+enum ProtocolKind {
+    Connect,
+    Disconnect,
+    Event,
+    Ack,
+    BinaryEvent,
+    BinaryAck,
 }
 
 impl Packet {

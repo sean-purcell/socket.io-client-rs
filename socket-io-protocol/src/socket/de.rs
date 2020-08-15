@@ -4,17 +4,7 @@ use owned_subslice::OwnedSubslice;
 use regex::Regex;
 use serde_json::value::RawValue;
 
-use super::{EngineMessage, Error, Kind, Packet};
-
-#[derive(Copy, Clone, Debug, PartialEq)]
-enum ParseKind {
-    Connect,
-    Disconnect,
-    Event,
-    Ack,
-    BinaryEvent,
-    BinaryAck,
-}
+use super::{EngineMessage, Error, Kind, Packet, ProtocolKind};
 
 #[derive(Debug)]
 #[cfg_attr(test, derive(PartialEq))]
@@ -31,7 +21,7 @@ pub enum DeserializeResult {
 #[cfg_attr(test, derive(PartialEq))]
 struct Parse {
     message: OwnedSubslice<String>,
-    kind: ParseKind,
+    kind: ProtocolKind,
     attachments: Option<u64>,
     namespace: Option<Range<usize>>,
     id: Option<u64>,
@@ -72,7 +62,7 @@ fn parse_text(text: OwnedSubslice<String>) -> Result<Parse, Error> {
         .captures(&*text)
         .ok_or_else(|| Error::InvalidMessage(text.to_string()))?;
     let kind = {
-        use ParseKind::*;
+        use ProtocolKind::*;
         match *captures
             .get(1)
             .unwrap()
@@ -134,17 +124,17 @@ fn deserialize_text(text: OwnedSubslice<String>) -> Result<DeserializeResult, Er
     let parse = parse_text(text)?;
 
     match parse.kind {
-        ParseKind::Connect => deserialize_dataless(parse, Kind::Connect, "connect")
+        ProtocolKind::Connect => deserialize_dataless(parse, Kind::Connect, "connect")
             .map(|p| DeserializeResult::Packet(p)),
-        ParseKind::Disconnect => deserialize_dataless(parse, Kind::Disconnect, "disconnect")
+        ProtocolKind::Disconnect => deserialize_dataless(parse, Kind::Disconnect, "disconnect")
             .map(DeserializeResult::Packet),
-        ParseKind::Event => deserialize_event(parse, Kind::Event, "event", Vec::new())
+        ProtocolKind::Event => deserialize_event(parse, Kind::Event, "event", Vec::new())
             .map(DeserializeResult::Packet),
-        ParseKind::Ack => {
+        ProtocolKind::Ack => {
             deserialize_event(parse, Kind::Ack, "ack", Vec::new()).map(DeserializeResult::Packet)
         }
-        ParseKind::BinaryEvent => deserialize_binary(parse, Kind::Event, "binary event"),
-        ParseKind::BinaryAck => deserialize_binary(parse, Kind::Ack, "binary ack"),
+        ProtocolKind::BinaryEvent => deserialize_binary(parse, Kind::Event, "binary event"),
+        ProtocolKind::BinaryAck => deserialize_binary(parse, Kind::Ack, "binary ack"),
     }
 }
 
@@ -191,10 +181,10 @@ pub fn deserialize_partial(
         })
         .collect::<Result<_, _>>()?;
     match parse.kind {
-        ParseKind::BinaryEvent => {
+        ProtocolKind::BinaryEvent => {
             deserialize_event(parse, Kind::Event, "binary event", attachments)
         }
-        ParseKind::BinaryAck => deserialize_event(parse, Kind::Ack, "binary ack", attachments),
+        ProtocolKind::BinaryAck => deserialize_event(parse, Kind::Ack, "binary ack", attachments),
         _ => unreachable!(),
     }
 }
@@ -276,7 +266,7 @@ mod tests {
             parse,
             Parse {
                 message: m.to_string().into(),
-                kind: ParseKind::BinaryEvent,
+                kind: ProtocolKind::BinaryEvent,
                 attachments: Some(0),
                 namespace: Some(range(3, 7)),
                 id: Some(1),
