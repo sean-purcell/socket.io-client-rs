@@ -3,7 +3,7 @@ use std::io::{Cursor, Write};
 use serde::Serialize;
 use tungstenite::Message as WsMessage;
 
-use crate::engine::{Message as EngineMessage, MESSAGE_HEADER as ENGINE_MESSAGE_HEADER};
+use crate::engine::{self, Message as EngineMessage, MESSAGE_HEADER as ENGINE_MESSAGE_HEADER};
 
 use super::{args, ArgsError, ProtocolKind};
 
@@ -118,7 +118,7 @@ impl PacketBuilder {
             s.push(']');
         }
         match self.approach {
-            Approach::Normal => vec![WsMessage::Text(s)],
+            Approach::Normal => vec![engine::package_message(s)],
             Approach::Binary {
                 kind,
                 namespace,
@@ -133,7 +133,7 @@ impl PacketBuilder {
                     id,
                 );
                 header.push_str(s.as_str());
-                attachments.insert(0, WsMessage::Text(header));
+                attachments.insert(0, engine::package_message(header));
                 attachments
             }
         }
