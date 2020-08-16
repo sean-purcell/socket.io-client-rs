@@ -7,6 +7,7 @@ use serde_json::{value::Value, Error as JsonError};
 use super::*;
 
 mod deserialize_attachments;
+mod serialize_attachments;
 
 #[derive(Debug, Clone)]
 pub struct Args<'a> {
