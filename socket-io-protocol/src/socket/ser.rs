@@ -97,7 +97,7 @@ impl PacketBuilder {
             Approach::Normal => args::serialize_arg(cursor, arg),
             Approach::Binary { attachments, .. } => {
                 let attachment_start = attachments.len();
-                let result: Result<(), ArgsError> = unimplemented!();
+                let result = args::serialize_arg_binary(cursor, arg, attachments);
                 if result.is_err() {
                     attachments.resize_with(attachment_start, || panic!("shrinking vector"));
                 }
@@ -202,20 +202,18 @@ mod tests {
         assert_eq!(packet, vec![WsMessage::Text(r#"42["event"]"#.to_string())]);
     }
 
-    /*
     #[test]
     fn test_simple_binary() {
         let data = [0xdeu8, 0xad, 0xbe, 0xef];
         let mut builder = PacketBuilder::new_ack(Some("/binary"), 3, true);
-        builder.serialize_arg(&data[..]);
+        builder.serialize_arg(&data[..]).unwrap();
         let packet = builder.finish();
         assert_eq!(
             packet,
             vec![
-                WsMessage::Text(r#"461-/binary,3[{"_placeholder":true,num:0}]"#.to_string()),
+                WsMessage::Text(r#"461-/binary,3[{"_placeholder":true,"num":0}]"#.to_string()),
                 WsMessage::Binary(vec![4, 0xde, 0xad, 0xbe, 0xef])
             ]
         );
     }
-    */
 }

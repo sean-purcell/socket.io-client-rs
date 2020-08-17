@@ -3,6 +3,7 @@ use std::{fmt, io::Write};
 use owned_subslice::OwnedSubslice;
 use serde::{Deserialize, Serialize};
 use serde_json::{value::Value, Error as JsonError};
+use tungstenite::Message as WsMessage;
 
 use super::*;
 
@@ -117,6 +118,14 @@ fn fill_placeholders_value(
 
 pub fn serialize_arg(writer: impl Write, arg: &(impl Serialize + ?Sized)) -> Result<(), Error> {
     serde_json::to_writer(writer, arg).map_err(Error::JsonSerError)
+}
+
+pub fn serialize_arg_binary(
+    writer: impl Write,
+    arg: &(impl Serialize + ?Sized),
+    buffers: &mut Vec<WsMessage>,
+) -> Result<(), Error> {
+    serialize_attachments::serialize_json(arg, writer, buffers).map_err(Error::JsonSerError)
 }
 
 impl<'a> Iterator for ArgsIter<'a> {
