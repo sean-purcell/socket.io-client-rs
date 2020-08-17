@@ -5,6 +5,7 @@ use tungstenite::Message as WsMessage;
 use owned_subslice::OwnedSubslice;
 
 pub const MESSAGE_HEADER: char = '4';
+pub const BINARY_HEADER: u8 = 4;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Packet {
@@ -170,7 +171,19 @@ pub fn encode_binary(data: &[u8]) -> WsMessage {
     let mut vec = Vec::with_capacity(data.len() + 1);
     vec.push(4);
     vec.extend_from_slice(data);
-    WsMessage::Binary(vec)
+    package_binary(vec)
+}
+
+/// Creates a message from the given text without extra copies or allocations.  The first byte in
+/// data must be equal to `BINARY_HEADER`, otherwise this function will panic.
+pub fn package_binary(data: Vec<u8>) -> WsMessage {
+    assert_eq!(
+        data.first(),
+        Some(&BINARY_HEADER),
+        "Invalid header for binary: {:?}",
+        data
+    );
+    WsMessage::Binary(data)
 }
 
 #[cfg(test)]

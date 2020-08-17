@@ -10,9 +10,50 @@ use serde::{
 };
 use tungstenite::Message as WsMessage;
 
+use crate::engine;
+
 struct Wrapper<'a, S> {
     s: S,
     buffers: &'a RefCell<Vec<WsMessage>>,
+}
+
+struct SeqWrapper<'a, S> {
+    buffers: &'a RefCell<Vec<WsMessage>>,
+    state: BytesState<S>,
+}
+
+enum BytesState<S: Serialize> {
+    Bytes {
+        s: Option<S>, // This is an option to allow us to take it while calling serialize
+        data: Vec<u8>,
+        len: Option<usize>,
+    },
+    Poisoned {
+        s: S::SerializeSeq,
+    },
+}
+
+struct SeqElementSerializer<'a, S> {
+    s: S,
+    buffers: &'a RefCell<Vec<WsMessage>>,
+    data: &'a Vec<u8>,
+    len: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct Placeholder {
+    #[serde(rename = "_placeholder")]
+    placeholder: bool,
+    num: u64,
+}
+
+impl Placeholder {
+    fn new(idx: usize) -> Self {
+        Placeholder {
+            placeholder: true,
+            num: idx as u64,
+        }
+    }
 }
 
 macro_rules! serialize_forward {
@@ -120,8 +161,15 @@ where
             name: &'static str,
             variant_index: u32,
             variant: &'static str,
-            v: &T
+            v: &T // FIXME: We need to be wrapping these
         ),
+    }
+
+    fn serialize_bytes(self, bytes: &[u8]) -> Result<Self::Ok, Self::Error> {
+        let buffers = self.buffers.borrow_mut();
+        let idx = buffers.len();
+        buffers.push(engine::encode_binary(bytes));
+        Placeholder::new(idx).serialize(self.s)
     }
 
     fn is_human_readable(&self) -> bool {
@@ -261,3 +309,82 @@ where
         self.s.end()
     }
 }
+
+impl<'a, S> SerializeSeq for SeqWrapper<'a, S>
+where
+    S: SerializeSeq,
+{
+    type Ok = S::Ok;
+    type Error = S::Error;
+
+    fn serialize_element<T: ?Sized + Serialize>(&mut self, v: &T) -> Result<(), Self::Error> {
+        match self.bytes {
+            BytesState::Bytes { s, data, len } => (SeqElementSerializer {
+                s: s.take().unwrap(),
+                buffers: self.buffers,
+                data: &data,
+                len,
+            })
+            .serialize(v),
+            BytesState::Poisoned { s } => s.serialize_element(v),
+        }
+    }
+
+    fn end(self) -> Result<Self::Ok, Self::Error> {
+        self.s.end()
+    }
+}
+
+// NOTE: This would be much simpler if serialize_element could be specialized for u8
+
+macro_rules! seq_serialize_forward {
+    ($($fn:ident $(<$param:ident>)? ( $($arg:ident : $ty:ty),* ) , )*) => {
+        $(
+            paste!{
+                fn [<serialize_ $fn>]$(<$param: Serialize + ?Sized>)?(
+                    self,
+                    $( $arg: $ty ),*
+                ) -> Result<Self::Ok, Self::Error>
+                {
+                    self.s.[<serialize_ $fn>]($( $arg , )*)
+                }
+            }
+        )*
+    };
+}
+
+macro_rules! seq_forward_wrapper {
+    ($($fn:ident ( $( $arg:ident : $ty:ty ),* ) -> $wrapped:ident , )*) => {
+        $(
+            paste!{
+                type [<Serialize $wrapped>] = Wrapper<'a, S::[<Serialize $wrapped>]>;
+
+                fn [<serialize_ $fn>](
+                    self,
+                    $( $arg: $ty ),*
+                ) -> Result<Self::[<Serialize $wrapped>], Self::Error> {
+                    let s = self.s.[<serialize_ $fn>]($($arg),*)?;
+                    Ok(Wrapper {
+                        s,
+                        buffers: self.buffers,
+                    })
+                }
+            }
+        )*
+    }
+}
+
+impl<'a, S> SeqElementSerializer<'a, S>
+where
+    S: Serialize,
+{
+    fn to_seq_serializer(self) -> Result<S::SerializeSeq, S::Error> {
+        let mut seq = self.s.serialize_seq(self.len)?;
+        for b in self.data.iter() {
+            seq.serialize_element(b)?;
+        }
+        Ok(seq)
+    }
+}
+
+impl<'a, S> Serializer for SeqElementSerializer<'a, S> {}
