@@ -409,10 +409,15 @@ where
     fn end(self) -> Result<Self::Ok, Self::Error> {
         match self.state {
             BytesState::Bytes { s, data, len: _ } => {
-                let mut buffers = self.buffers.borrow_mut();
-                let idx = buffers.len();
-                buffers.push(engine::package_binary(data));
-                Placeholder::new(idx).serialize(s.unwrap())
+                if data.len() == 0 {
+                    let seq = s.unwrap().serialize_seq(Some(0))?;
+                    seq.end()
+                } else {
+                    let mut buffers = self.buffers.borrow_mut();
+                    let idx = buffers.len();
+                    buffers.push(engine::package_binary(data));
+                    Placeholder::new(idx).serialize(s.unwrap())
+                }
             }
             BytesState::Poisoned { s } => s.end(),
         }
@@ -549,6 +554,8 @@ mod tests {
 
     use std::io::Cursor;
 
+    const DEADBEEF: &'static [u8] = &[0xde, 0xad, 0xbe, 0xef];
+
     fn serialize_json_string<T: ?Sized + Serialize>(
         arg: &T,
     ) -> Result<(String, Vec<WsMessage>), JsonError> {
@@ -567,6 +574,67 @@ mod tests {
         assert_eq!(
             serialize_json_string("test").unwrap(),
             (r#""test""#.to_string(), vec![])
+        );
+    }
+
+    #[derive(Serialize)]
+    struct Basic {
+        a: u8,
+        b: &'static str,
+    }
+
+    #[test]
+    fn test_simple_struct() {
+        assert_eq!(
+            serialize_json_string(&Basic { a: 5, b: "test" }).unwrap(),
+            (r#"{"a":5,"b":"test"}"#.to_string(), vec![])
+        );
+    }
+
+    #[test]
+    fn test_bytes() {
+        assert_eq!(
+            serialize_json_string(DEADBEEF).unwrap(),
+            (
+                r#"{"_placeholder":true,"num":0}"#.to_string(),
+                vec![engine::encode_binary(DEADBEEF)]
+            )
+        );
+    }
+
+    #[derive(Serialize)]
+    struct Nested {
+        v: Vec<Inner>,
+    }
+
+    #[derive(Serialize)]
+    struct Inner {
+        d: Vec<u8>,
+    }
+
+    #[test]
+    fn test_nested_bytes() {
+        let n = Nested {
+            v: vec![
+                Inner {
+                    d: DEADBEEF.to_vec(),
+                },
+                Inner { d: vec![] },
+                Inner {
+                    d: vec![0, 1, 2, 3, 4, 5, 6],
+                },
+            ],
+        };
+
+        assert_eq!(
+            serialize_json_string(&n).unwrap(),
+            (
+                r#"{"v":[{"d":{"_placeholder":true,"num":0}},{"d":[]},{"d":{"_placeholder":true,"num":1}}]}"#.to_string(),
+                vec![
+                    engine::encode_binary(DEADBEEF),
+                    engine::encode_binary(&[0, 1, 2, 3, 4, 5, 6])
+                ],
+            )
         );
     }
 }
