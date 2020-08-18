@@ -22,6 +22,7 @@ use futures::{
 use url::Url;
 
 mod callbacks;
+mod emit;
 pub mod protocol;
 mod receiver;
 
@@ -34,6 +35,7 @@ pub struct Client {
     close_handle: Option<(oneshot::Sender<()>, RemoteHandle<Result<(), Error>>)>,
     callbacks: Arc<Mutex<Callbacks>>,
     _receiver: Receiver,
+    next_id: u64,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -156,6 +158,7 @@ impl Client {
             close_handle: Some((close, handle)),
             callbacks,
             _receiver,
+            next_id: 0,
         })
     }
 
