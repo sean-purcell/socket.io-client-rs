@@ -101,7 +101,7 @@ async fn receive_task(
                 }
             }
             Data::Ack { id, args } => {
-                if let Some(mut cb) = callbacks.lock().unwrap().get_and_clear_ack(namespace, id) {
+                if let Some(cb) = callbacks.lock().unwrap().get_and_clear_ack(namespace, id) {
                     cb.call(&args);
                 } else {
                     return Err(Error::UnexpectedAck(packet.clone()));

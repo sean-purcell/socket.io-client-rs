@@ -6,7 +6,7 @@ use std::{
 use socket_io_protocol::socket::Args;
 
 // TODO: Is there a cleaner way to do this?
-macro_rules! impl_callback {
+macro_rules! impl_fnmut_callback {
     ($(#[$attr:meta])* $name:ident ( $($arg:ident : $ty:ty),* )) => {
         $(#[$attr])*
         #[derive(Clone)]
@@ -36,9 +36,47 @@ macro_rules! impl_callback {
     }
 }
 
-impl_callback! {
-    /// A wrapper type for event callbacks.
-    Callback(args: &Args)
+macro_rules! impl_fnonce_callback {
+    ($(#[$attr:meta])* $name:ident ( $($arg:ident : $ty:ty),* )) => {
+        $(#[$attr])*
+        pub struct $name(Box<dyn 'static + Send + FnOnce($($ty),*)>);
+
+        impl $name {
+            pub fn call(self, $($arg : $ty),*) {
+                (self.0)($($arg),*)
+            }
+        }
+
+        impl<F> From<F> for $name
+        where
+            F: 'static + Send + FnOnce($($ty),*)
+        {
+            fn from(f: F) -> Self {
+                $name(Box::new(f))
+            }
+        }
+
+        #[cfg(test)]
+        impl From<Box<dyn 'static + Send + FnOnce($($ty),*)>> for $name {
+            fn from(a: Box<dyn 'static + Send + FnOnce($($ty),*)>) -> Self {
+                $name(a)
+            }
+        }
+    }
+}
+
+// TODO: Add callback for connection status updates
+
+impl_fnmut_callback! {
+    /// A wrapper type for event callbacks, which must be stored and called potentially repeatedly.
+    /// They are stored as Arc<Mutex<dyn T>> to allow releasing the mutex on the main map of
+    /// callbacks before calling the callback.
+    EventCallback(args: &Args)
+}
+
+impl_fnonce_callback! {
+    /// A wrapper type for ack callbacks, which only need to be called once.
+    AckCallback(args: &Args) // TODO: Add response builder
 }
 
 pub struct Callbacks {
@@ -46,9 +84,9 @@ pub struct Callbacks {
 }
 
 struct Namespace {
-    fallback: Option<Callback>,
-    events: HashMap<String, Callback>,
-    acks: HashMap<u64, Callback>,
+    fallback: Option<EventCallback>,
+    events: HashMap<String, EventCallback>,
+    acks: HashMap<u64, AckCallback>,
 }
 
 impl Callbacks {
@@ -58,15 +96,15 @@ impl Callbacks {
         }
     }
 
-    pub fn get_event(&self, namespace: &str, event: &str) -> Option<Callback> {
+    pub fn get_event(&self, namespace: &str, event: &str) -> Option<EventCallback> {
         let ns = self.namespaces.get(namespace)?;
         ns.events
             .get(event)
             .or(ns.fallback.as_ref())
-            .map(Callback::clone)
+            .map(EventCallback::clone)
     }
 
-    pub fn set_event(&mut self, namespace: &str, event: &str, callback: impl Into<Callback>) {
+    pub fn set_event(&mut self, namespace: &str, event: &str, callback: impl Into<EventCallback>) {
         self.get_or_create_namespace(namespace)
             .events
             .insert(event.to_string(), callback.into());
@@ -78,7 +116,7 @@ impl Callbacks {
         }
     }
 
-    pub fn set_fallback(&mut self, namespace: &str, callback: impl Into<Callback>) {
+    pub fn set_fallback(&mut self, namespace: &str, callback: impl Into<EventCallback>) {
         self.get_or_create_namespace(namespace).fallback = Some(callback.into());
     }
 
@@ -88,12 +126,12 @@ impl Callbacks {
         }
     }
 
-    pub fn get_and_clear_ack(&mut self, namespace: &str, id: u64) -> Option<Callback> {
+    pub fn get_and_clear_ack(&mut self, namespace: &str, id: u64) -> Option<AckCallback> {
         let ns = self.namespaces.get_mut(namespace)?;
         ns.acks.remove(&id)
     }
 
-    pub fn set_ack(&mut self, namespace: &str, id: u64, callback: impl Into<Callback>) {
+    pub fn set_ack(&mut self, namespace: &str, id: u64, callback: impl Into<AckCallback>) {
         self.get_or_create_namespace(namespace)
             .acks
             .insert(id, callback.into());

@@ -25,8 +25,8 @@ mod callbacks;
 pub mod protocol;
 mod receiver;
 
-pub use callbacks::Callback;
 use callbacks::Callbacks;
+pub use callbacks::{AckCallback, EventCallback};
 use receiver::Receiver;
 
 pub struct Client {
@@ -168,7 +168,7 @@ impl Client {
 
     fwd_cbs! {
         /// Set the callback for messages received to this namespace and event.
-        set event(event: &str, callback: impl Into<Callback>)
+        set event(event: &str, callback: impl Into<EventCallback>)
     }
     fwd_cbs! {
         /// Clears any callback set for messages received to this namespace and event,
@@ -178,7 +178,7 @@ impl Client {
     fwd_cbs! {
         /// Set the fallback callback for this namespace, which will be called for messages for any
         /// event without a callback set.
-        set fallback(callback: impl Into<Callback>)
+        set fallback(callback: impl Into<EventCallback>)
     }
     fwd_cbs! {
         /// Clears the fallback callback for this namespace.
