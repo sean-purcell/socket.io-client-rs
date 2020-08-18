@@ -55,13 +55,6 @@ macro_rules! impl_fnonce_callback {
                 $name(Box::new(f))
             }
         }
-
-        #[cfg(test)]
-        impl From<Box<dyn 'static + Send + FnOnce($($ty),*)>> for $name {
-            fn from(a: Box<dyn 'static + Send + FnOnce($($ty),*)>) -> Self {
-                $name(a)
-            }
-        }
     }
 }
 
@@ -71,12 +64,12 @@ impl_fnmut_callback! {
     /// A wrapper type for event callbacks, which must be stored and called potentially repeatedly.
     /// They are stored as Arc<Mutex<dyn T>> to allow releasing the mutex on the main map of
     /// callbacks before calling the callback.
-    EventCallback(args: &Args)
+    EventCallback(args: &Args) // TODO: Add response builder
 }
 
 impl_fnonce_callback! {
     /// A wrapper type for ack callbacks, which only need to be called once.
-    AckCallback(args: &Args) // TODO: Add response builder
+    AckCallback(args: &Args)
 }
 
 pub struct Callbacks {
@@ -162,12 +155,12 @@ mod tests {
     fn test_simple() {
         let mut callbacks = Callbacks::new();
 
-        let c0: Callback = (|_args: &Args| {}).into();
-        let c1: Callback = (|_args: &Args| {}).into();
-        let c2: Callback = (|_args: &Args| {}).into();
+        let c0: EventCallback = (|_args: &Args| {}).into();
+        let c1: EventCallback = (|_args: &Args| {}).into();
+        let c2: AckCallback = (|_args: &Args| {}).into();
         callbacks.set_event("/", "msg", c0.clone());
         callbacks.set_fallback("/", c1.clone());
-        callbacks.set_ack("/", 0, c2.clone());
+        callbacks.set_ack("/", 0, c2);
 
         assert!(Arc::ptr_eq(
             &callbacks.get_event("/", "msg").as_ref().unwrap().0,
@@ -178,10 +171,7 @@ mod tests {
             &c1.0
         ));
         assert!(callbacks.get_event("/ns", "msg").is_none());
-        assert!(Arc::ptr_eq(
-            &callbacks.get_and_clear_ack("/", 0).as_ref().unwrap().0,
-            &c2.0
-        ));
+        assert!(callbacks.get_and_clear_ack("/", 0).is_some());
         assert!(callbacks.get_and_clear_ack("/", 0).is_none());
     }
 }
