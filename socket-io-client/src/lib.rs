@@ -28,6 +28,7 @@ mod receiver;
 
 use callbacks::Callbacks;
 pub use callbacks::{AckCallback, EventCallback};
+pub use emit::{EventArgsBuilder, EventBuilder};
 use receiver::Receiver;
 
 pub struct Client {
@@ -167,6 +168,20 @@ impl Client {
 
         let _ = close.send(());
         handle.await
+    }
+
+    /// Create an `EmitBuilder` to emit an event for the given namespace.
+    pub fn namespace_emit<'a: 'd, 'b: 'd, 'c: 'd, 'd>(
+        &'a mut self,
+        namespace: &'b str,
+        event: &'c str,
+    ) -> EventBuilder<'d> {
+        EventBuilder::new(self, event, namespace)
+    }
+
+    /// Equivalent to `namespace_emit("/", event)`.
+    pub fn emit<'a: 'c, 'b: 'c, 'c>(&'a mut self, event: &'b str) -> EventBuilder<'c> {
+        self.namespace_emit("/", event)
     }
 
     fwd_cbs! {
