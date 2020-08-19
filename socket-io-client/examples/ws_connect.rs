@@ -60,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
         client
             .send
-            .unbounded_send(WsMessage::Text(format!("40{},", namespace)))?;
+            .unbounded_send(vec![WsMessage::Text(format!("40{},", namespace))])?;
     }
 
     timeout.await;

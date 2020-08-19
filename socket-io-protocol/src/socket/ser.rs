@@ -1,4 +1,7 @@
-use std::io::{Cursor, Write};
+use std::{
+    borrow::Cow,
+    io::{Cursor, Write},
+};
 
 use serde::Serialize;
 use tungstenite::Message as WsMessage;
@@ -17,45 +20,39 @@ enum Approach {
     Normal,
     Binary {
         kind: ProtocolKind,
-        namespace: Option<String>,
+        namespace: Cow<'static, str>,
         id: Option<u64>,
         attachments: Vec<WsMessage>,
     },
 }
 
+enum Kind {
+    Event,
+    Ack,
+}
+
 impl PacketBuilder {
-    pub fn new_event(event: &str, namespace: Option<&str>, id: Option<u64>, binary: bool) -> Self {
-        let mut builder = if !binary {
-            let buffer = serialize_header(ProtocolKind::Event, None, namespace, id).into_bytes();
-            PacketBuilder {
-                buffer,
-                approach: Approach::Normal,
-                first: true,
-            }
-        } else {
-            let buffer = Vec::new();
-            let namespace = namespace.map(|x| x.to_string());
-            PacketBuilder {
-                buffer,
-                approach: Approach::Binary {
-                    kind: ProtocolKind::BinaryEvent,
-                    namespace,
-                    id,
-                    attachments: Vec::new(),
-                },
-                first: true,
-            }
-        };
+    pub fn new_event(event: &str, namespace: &str, id: Option<u64>, binary: bool) -> Self {
+        let mut builder = PacketBuilder::new(namespace, id, binary, Kind::Event);
         builder
             .serialize_arg(event)
             .expect("Serialization of &str failed");
         builder
     }
 
-    pub fn new_ack(namespace: Option<&str>, id: u64, binary: bool) -> Self {
+    pub fn new_ack(namespace: &str, id: u64, binary: bool) -> Self {
+        PacketBuilder::new(namespace, Some(id), binary, Kind::Ack)
+    }
+
+    fn new(namespace: &str, id: Option<u64>, binary: bool, kind: Kind) -> Self {
+        let kind = match (binary, kind) {
+            (false, Kind::Event) => ProtocolKind::Event,
+            (false, Kind::Ack) => ProtocolKind::Ack,
+            (true, Kind::Event) => ProtocolKind::BinaryEvent,
+            (true, Kind::Ack) => ProtocolKind::BinaryAck,
+        };
         if !binary {
-            let buffer =
-                serialize_header(ProtocolKind::Ack, None, namespace, Some(id)).into_bytes();
+            let buffer = serialize_header(kind, None, namespace, id).into_bytes();
             PacketBuilder {
                 buffer,
                 approach: Approach::Normal,
@@ -63,13 +60,17 @@ impl PacketBuilder {
             }
         } else {
             let buffer = Vec::new();
-            let namespace = namespace.map(|x| x.to_string());
+            let namespace = if namespace == "/" {
+                Cow::Borrowed("/")
+            } else {
+                Cow::Owned(namespace.to_string())
+            };
             PacketBuilder {
                 buffer,
                 approach: Approach::Binary {
-                    kind: ProtocolKind::BinaryAck,
+                    kind,
                     namespace,
-                    id: Some(id),
+                    id: id,
                     attachments: Vec::new(),
                 },
                 first: true,
@@ -126,12 +127,8 @@ impl PacketBuilder {
                 mut attachments,
             } => {
                 // Create the header
-                let mut header = serialize_header(
-                    kind,
-                    Some(attachments.len() as u64),
-                    namespace.as_ref().map(|x| x.as_str()),
-                    id,
-                );
+                let mut header =
+                    serialize_header(kind, Some(attachments.len() as u64), &*namespace, id);
                 header.push_str(s.as_str());
                 attachments.insert(0, engine::package_message(header));
                 attachments
@@ -140,18 +137,18 @@ impl PacketBuilder {
     }
 }
 
-pub fn serialize_connect(namespace: Option<&str>) -> EngineMessage {
+pub fn serialize_connect(namespace: &str) -> EngineMessage {
     EngineMessage::Text(serialize_header(ProtocolKind::Connect, None, namespace, None).into())
 }
 
-pub fn serialize_disconnect(namespace: Option<&str>) -> EngineMessage {
+pub fn serialize_disconnect(namespace: &str) -> EngineMessage {
     EngineMessage::Text(serialize_header(ProtocolKind::Disconnect, None, namespace, None).into())
 }
 
 fn serialize_header(
     kind: ProtocolKind,
     attachments: Option<u64>,
-    namespace: Option<&str>,
+    namespace: &str,
     id: Option<u64>,
 ) -> String {
     let mut header = vec![ENGINE_MESSAGE_HEADER as u8];
@@ -167,7 +164,7 @@ fn serialize_header(
     if let Some(attachments) = attachments {
         write!(header, "{}-", attachments).unwrap();
     }
-    if let Some(namespace) = namespace {
+    if namespace != "/" {
         write!(header, "{},", namespace).unwrap();
     }
     if let Some(id) = id {
@@ -183,7 +180,7 @@ mod tests {
     #[test]
     fn test_connect() {
         assert_eq!(
-            serialize_connect(None),
+            serialize_connect("/"),
             EngineMessage::Text("40".to_string().into())
         );
     }
@@ -191,21 +188,21 @@ mod tests {
     #[test]
     fn test_disconnect() {
         assert_eq!(
-            serialize_disconnect(Some("/nsp")),
+            serialize_disconnect("/nsp"),
             EngineMessage::Text("41/nsp,".to_string().into())
         );
     }
 
     #[test]
     fn test_simple() {
-        let packet = PacketBuilder::new_event("event", None, None, false).finish();
+        let packet = PacketBuilder::new_event("event", "/", None, false).finish();
         assert_eq!(packet, vec![WsMessage::Text(r#"42["event"]"#.to_string())]);
     }
 
     #[test]
     fn test_simple_binary() {
         let data = [0xdeu8, 0xad, 0xbe, 0xef];
-        let mut builder = PacketBuilder::new_ack(Some("/binary"), 3, true);
+        let mut builder = PacketBuilder::new_ack("/binary", 3, true);
         builder.serialize_arg(&data[..]).unwrap();
         let packet = builder.finish();
         assert_eq!(

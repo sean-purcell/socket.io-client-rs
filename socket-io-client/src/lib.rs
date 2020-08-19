@@ -31,7 +31,7 @@ pub use callbacks::{AckCallback, EventCallback};
 use receiver::Receiver;
 
 pub struct Client {
-    pub send: mpsc::UnboundedSender<WsMessage>,
+    pub send: mpsc::UnboundedSender<Vec<WsMessage>>,
     close_handle: Option<(oneshot::Sender<()>, RemoteHandle<Result<(), Error>>)>,
     callbacks: Arc<Mutex<Callbacks>>,
     _receiver: Receiver,
@@ -194,7 +194,7 @@ async fn process_websocket<S>(
     spawn: &impl Spawn,
 ) -> Result<
     (
-        mpsc::UnboundedSender<WsMessage>,
+        mpsc::UnboundedSender<Vec<WsMessage>>,
         mpsc::UnboundedReceiver<WsMessage>,
         oneshot::Sender<()>,
         RemoteHandle<Result<(), Error>>,
@@ -205,7 +205,7 @@ where
     S: 'static + Unpin + AsyncRead + AsyncWrite + Send,
 {
     let (mut sink, mut stream) = stream.split();
-    let (send_tx, mut send_rx) = mpsc::unbounded();
+    let (send_tx, mut send_rx) = mpsc::unbounded::<Vec<WsMessage>>();
     let (mut receive_tx, receive_rx) = mpsc::unbounded();
     let (close_tx, close_rx) = oneshot::channel();
 
@@ -235,14 +235,16 @@ where
                     }
                 }
                 result = send_rx.next() => {
-                    let msg = match result {
+                    let msgs = match result {
                         Some(msg) => msg,
                         None => panic!("Sending stream closed unexpectedly"),
                     };
-                    log::trace!("sending message: {:?}", msg);
-                    match sink.send(msg).await {
-                        Ok(()) => (),
-                        Err(e) => return Err(e.into()),
+                    for msg in msgs.into_iter() {
+                        log::trace!("sending message: {:?}", msg);
+                        match sink.send(msg).await {
+                            Ok(()) => (),
+                            Err(e) => return Err(e.into()),
+                        }
                     }
                 }
                 _ = closed => {
@@ -456,7 +458,7 @@ mod tests {
                 process_websocket(client, spawn_ref).await.unwrap();
 
             c_send
-                .unbounded_send(WsMessage::Ping(vec![0xde, 0xad, 0xbe, 0xef]))
+                .unbounded_send(vec![WsMessage::Ping(vec![0xde, 0xad, 0xbe, 0xef])])
                 .unwrap();
             let resp = c_recv.next().await.unwrap();
             assert_eq!(resp, WsMessage::Pong(vec![0xde, 0xad, 0xbe, 0xef]));

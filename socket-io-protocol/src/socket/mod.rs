@@ -70,8 +70,11 @@ enum ProtocolKind {
 }
 
 impl Packet {
-    pub fn namespace(&self) -> Option<&str> {
-        self.namespace.clone().map(|range| &self.message[range])
+    pub fn namespace(&self) -> &str {
+        self.namespace
+            .clone()
+            .map(|range| &self.message[range])
+            .unwrap_or("/")
     }
 
     pub fn data(&self) -> Data<'_> {

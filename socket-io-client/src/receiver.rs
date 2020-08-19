@@ -45,7 +45,7 @@ struct InProgress {
 impl Receiver {
     pub fn new(
         receiver: mpsc::UnboundedReceiver<WsMessage>,
-        sender: mpsc::UnboundedSender<WsMessage>,
+        sender: mpsc::UnboundedSender<Vec<WsMessage>>,
         callbacks: Arc<Mutex<Callbacks>>,
         spawn: &impl Spawn,
     ) -> Result<Receiver, SpawnError> {
@@ -71,7 +71,7 @@ where
 
 async fn receive_task(
     mut receiver: mpsc::UnboundedReceiver<WsMessage>,
-    _sender: mpsc::UnboundedSender<WsMessage>,
+    _sender: mpsc::UnboundedSender<Vec<WsMessage>>,
     callbacks: Arc<Mutex<Callbacks>>,
 ) -> Result<(), Error> {
     let mut decoder = Decoder::new();
@@ -80,7 +80,7 @@ async fn receive_task(
 
     let process_packet = |packet: Packet| {
         log::info!("Received packet: {}", packet);
-        let namespace = packet.namespace().unwrap_or("/");
+        let namespace = packet.namespace();
         match packet.data() {
             Data::Connect => {
                 log::info!("Received connect for {}", namespace);
