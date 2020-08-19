@@ -44,12 +44,12 @@ impl<'a> EventBuilder<'a> {
         }
     }
 
-    pub fn binary(&mut self, b: bool) -> &mut Self {
+    pub fn binary(mut self, b: bool) -> Self {
         self.binary = b;
         self
     }
 
-    pub fn callback(&mut self, c: impl Into<AckCallback>) -> &mut Self {
+    pub fn callback(mut self, c: impl Into<AckCallback>) -> Self {
         let id = self.client.next_id;
         self.client.next_id += 1;
         self.callback = Some((c.into(), id));
@@ -73,15 +73,22 @@ impl<'a> EventBuilder<'a> {
 }
 
 impl<'a> EventArgsBuilder<'a> {
-    pub fn arg<T>(&mut self, arg: &T) -> Result<&mut Self, ArgsError>
+    pub fn arg<T>(mut self, arg: &T) -> Result<Self, ArgsError>
     where
         T: Serialize + ?Sized,
     {
-        self.builder.serialize_arg(arg)?;
+        self.arg_ref(arg)?;
         Ok(self)
     }
 
-    pub fn finish(self) {
+    pub fn arg_ref<T>(&mut self, arg: &T) -> Result<(), ArgsError>
+    where
+        T: Serialize + ?Sized,
+    {
+        self.builder.serialize_arg(arg)
+    }
+
+    pub fn send(self) {
         let packets = self.builder.finish();
         if let Some((callback, id)) = self.callback {
             self.client
@@ -108,7 +115,7 @@ impl AckBuilder {
         }
     }
 
-    pub fn binary(&mut self, b: bool) -> &mut Self {
+    pub fn binary(mut self, b: bool) -> Self {
         self.binary = b;
         self
     }
@@ -123,15 +130,22 @@ impl AckBuilder {
 }
 
 impl AckArgsBuilder {
-    pub fn arg<T>(&mut self, arg: &T) -> Result<&mut Self, ArgsError>
+    pub fn arg<T>(mut self, arg: &T) -> Result<Self, ArgsError>
     where
         T: Serialize + ?Sized,
     {
-        self.builder.serialize_arg(arg)?;
+        self.arg_ref(arg)?;
         Ok(self)
     }
 
-    pub fn finish(self) {
+    pub fn arg_ref<T>(&mut self, arg: &T) -> Result<(), ArgsError>
+    where
+        T: Serialize + ?Sized,
+    {
+        self.builder.serialize_arg(arg)
+    }
+
+    pub fn send(self) {
         let packets = self.builder.finish();
         let _ = self.send.unbounded_send(packets); // TODO: Determine if we care about the result.
     }
