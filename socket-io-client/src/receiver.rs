@@ -17,7 +17,7 @@ use socket_io_protocol::{
     socket::{self, ArgsError, Data, DeserializeResult, Error as SocketError, Packet, Partial},
 };
 
-use super::Callbacks;
+use super::{AckBuilder, Callbacks};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -71,7 +71,7 @@ where
 
 async fn receive_task(
     mut receiver: mpsc::UnboundedReceiver<WsMessage>,
-    _sender: mpsc::UnboundedSender<Vec<WsMessage>>,
+    sender: mpsc::UnboundedSender<Vec<WsMessage>>,
     callbacks: Arc<Mutex<Callbacks>>,
 ) -> Result<(), Error> {
     let mut decoder = Decoder::new();
@@ -90,14 +90,15 @@ async fn receive_task(
                 log::info!("Received disconnect for {}", namespace);
                 // TODO: Call disconnect callback
             }
-            Data::Event { args, .. } => {
+            Data::Event { args, id } => {
                 let event = args
                     .get(0)
                     .ok_or_else(|| Error::EventNoArgs(packet.clone()))?;
                 let event: Cow<'_, str> = event.deserialize()?;
+                let ack = id.map(|id| AckBuilder::new(sender.clone(), namespace, id));
                 // TODO: Use id to create ack callback
                 if let Some(mut cb) = callbacks.lock().unwrap().get_event(namespace, &*event) {
-                    cb.call(&args);
+                    cb.call(&args, ack);
                 }
             }
             Data::Ack { id, args } => {

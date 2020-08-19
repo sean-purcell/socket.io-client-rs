@@ -5,6 +5,8 @@ use std::{
 
 use socket_io_protocol::socket::Args;
 
+use super::AckBuilder;
+
 // TODO: Is there a cleaner way to do this?
 macro_rules! impl_fnmut_callback {
     ($(#[$attr:meta])* $name:ident ( $($arg:ident : $ty:ty),* )) => {
@@ -64,7 +66,7 @@ impl_fnmut_callback! {
     /// A wrapper type for event callbacks, which must be stored and called potentially repeatedly.
     /// They are stored as Arc<Mutex<dyn T>> to allow releasing the mutex on the main map of
     /// callbacks before calling the callback.
-    EventCallback(args: &Args) // TODO: Add response builder
+    EventCallback(args: &Args, ack: Option<AckBuilder>) // TODO: Add response builder
 }
 
 impl_fnonce_callback! {

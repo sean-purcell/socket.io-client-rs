@@ -28,7 +28,7 @@ mod receiver;
 
 use callbacks::Callbacks;
 pub use callbacks::{AckCallback, EventCallback};
-pub use emit::{EventArgsBuilder, EventBuilder};
+pub use emit::{AckArgsBuilder, AckBuilder, EventArgsBuilder, EventBuilder};
 use receiver::Receiver;
 
 pub struct Client {
