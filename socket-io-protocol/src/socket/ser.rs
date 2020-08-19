@@ -32,7 +32,12 @@ enum Kind {
 }
 
 impl PacketBuilder {
-    pub fn new_event(event: &str, namespace: &str, id: Option<u64>, binary: bool) -> Self {
+    pub fn new_event<'a>(
+        event: &str,
+        namespace: impl Into<Cow<'a, str>>,
+        id: Option<u64>,
+        binary: bool,
+    ) -> Self {
         let mut builder = PacketBuilder::new(namespace, id, binary, Kind::Event);
         builder
             .serialize_arg(event)
@@ -40,19 +45,25 @@ impl PacketBuilder {
         builder
     }
 
-    pub fn new_ack(namespace: &str, id: u64, binary: bool) -> Self {
+    pub fn new_ack<'a>(namespace: impl Into<Cow<'a, str>>, id: u64, binary: bool) -> Self {
         PacketBuilder::new(namespace, Some(id), binary, Kind::Ack)
     }
 
-    fn new(namespace: &str, id: Option<u64>, binary: bool, kind: Kind) -> Self {
+    fn new<'a>(
+        namespace: impl Into<Cow<'a, str>>,
+        id: Option<u64>,
+        binary: bool,
+        kind: Kind,
+    ) -> Self {
         let kind = match (binary, kind) {
             (false, Kind::Event) => ProtocolKind::Event,
             (false, Kind::Ack) => ProtocolKind::Ack,
             (true, Kind::Event) => ProtocolKind::BinaryEvent,
             (true, Kind::Ack) => ProtocolKind::BinaryAck,
         };
+        let namespace = namespace.into();
         if !binary {
-            let buffer = serialize_header(kind, None, namespace, id).into_bytes();
+            let buffer = serialize_header(kind, None, &*namespace, id).into_bytes();
             PacketBuilder {
                 buffer,
                 approach: Approach::Normal,
@@ -60,10 +71,10 @@ impl PacketBuilder {
             }
         } else {
             let buffer = Vec::new();
-            let namespace = if namespace == "/" {
+            let namespace = if &*namespace == "/" {
                 Cow::Borrowed("/")
             } else {
-                Cow::Owned(namespace.to_string())
+                Cow::Owned(namespace.into_owned())
             };
             PacketBuilder {
                 buffer,
