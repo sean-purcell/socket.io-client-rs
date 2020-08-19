@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use async_tungstenite::{tokio::TokioAdapter, tungstenite::Message as WsMessage};
+use async_tungstenite::tokio::TokioAdapter;
 use futures::{
     future::FutureExt,
     task::{FutureObj, Spawn, SpawnError},
@@ -8,7 +8,7 @@ use futures::{
 use structopt::StructOpt;
 use tokio::{io, net::TcpStream};
 
-use socket_io_client::{protocol, Client};
+use socket_io_client::{protocol, AckBuilder, Client};
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "ws_connect")]
@@ -19,10 +19,6 @@ struct Opt {
     /// Timeout seconds
     #[structopt(short, long, default_value = "1")]
     timeout: u64,
-
-    /// Send a connect message for the provided namespace
-    #[structopt(short, long)]
-    namespace: Option<String>,
 }
 
 struct TokioSpawn();
@@ -51,17 +47,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut client = Client::connect(opt.url, connect, &spawn).await?;
 
     client.set_fallback_callback(|args: &protocol::Args, _ack| println!("{}", args));
-    let timeout = tokio::time::delay_for(Duration::from_secs(opt.timeout)).fuse();
+    client.set_event_callback("types", |args: &protocol::Args, ack: Option<AckBuilder>| {
+        println!("types messaged received: {}", args);
+        if let Some(ack) = ack {
+            println!("Emitting ack");
+            ack.args().arg("message received").unwrap().send();
+        }
+    });
+    println!("Callbacks registered");
 
-    if let Some(namespace) = &opt.namespace {
-        let n2 = namespace.clone();
-        client.set_namespace_fallback_callback(namespace, move |args: &protocol::Args, _ack| {
-            println!("{}: {}", n2, args)
-        });
-        client
-            .send
-            .unbounded_send(vec![WsMessage::Text(format!("40{},", namespace))])?;
-    }
+    client
+        .emit("event")
+        .binary(true)
+        .callback(|args: &protocol::Args| {
+            println!("event ack received: {}", args);
+        })
+        .args()
+        .arg(&vec![0xdeu8, 0xad, 0xbe, 0xef])?
+        .arg("hello")?
+        .send();
+
+    let timeout = tokio::time::delay_for(Duration::from_secs(opt.timeout)).fuse();
 
     timeout.await;
 
