@@ -25,6 +25,7 @@ pub struct Connection {
     close: Option<oneshot::Sender<()>>,
     sid: String,
     send: mpsc::UnboundedSender<Vec<WsMessage>>,
+    timeout: Duration,
 }
 
 impl Connection {
@@ -42,15 +43,15 @@ impl Connection {
         if let Some(sid) = sid {
             url.query_pairs_mut().append_pair("sid", sid);
         }
-        let timeout = Delay::new(timeout).fuse();
+        let timeout_fut = Delay::new(timeout).fuse();
 
         let client = async_tls::client_async_tls(url.to_string(), connection).fuse();
         pin_mut!(client);
-        pin_mut!(timeout);
+        pin_mut!(timeout_fut);
 
         let client = select! {
             c = client => c.map(|(c, _)| c).map_err(|e| e.into()),
-            _ = timeout => Err(Error::Timeout),
+            _ = timeout_fut => Err(Error::Timeout("websocket handshake")),
         }?;
 
         let (send_tx, send_rx) = mpsc::unbounded();
@@ -68,7 +69,10 @@ impl Connection {
         )
         .await?;
 
-        let open = open_rx.await.unwrap();
+        let open = select! {
+            open = open_rx.fuse() => Ok(open.unwrap()),
+            _ = timeout_fut => Err(Error::Timeout("engine.io protocol Open message")),
+        }?;
         log::trace!("Received open: {:?}", open);
 
         Ok(Connection {
@@ -76,6 +80,7 @@ impl Connection {
             close: Some(close_tx),
             sid: open.sid,
             send: send_tx,
+            timeout,
         })
     }
 
@@ -89,8 +94,12 @@ impl Connection {
 
     pub async fn close(&mut self) -> Result<(), Error> {
         if let (Some(handle), Some(close)) = (self.handle.take(), self.close.take()) {
+            let timeout = Delay::new(self.timeout);
             let _ = close.send(());
-            handle.await
+            select! {
+                r = handle.fuse() => r,
+                _ = timeout.fuse() => Err(Error::Timeout("close")),
+            }
         } else {
             Err(Error::AlreadyClosed)
         }

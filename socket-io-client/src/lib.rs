@@ -46,8 +46,8 @@ pub enum Error {
     SpawnError(#[from] SpawnError),
     #[error("Error processing packet: {0}")]
     ProcessingError(#[from] receiver::Error),
-    #[error("Connection timed out")]
-    Timeout,
+    #[error("Connection timed out waiting for {0}")]
+    Timeout(&'static str),
     #[error("Already closed")]
     AlreadyClosed,
 }
