@@ -174,6 +174,14 @@ pub fn encode_binary(data: &[u8]) -> WsMessage {
     package_binary(vec)
 }
 
+pub fn encode_ping() -> WsMessage {
+    WsMessage::Text("2".into())
+}
+
+pub fn encode_pong() -> WsMessage {
+    WsMessage::Text("3".into())
+}
+
 /// Creates a message from the given text without extra copies or allocations.  The first byte in
 /// data must be equal to `BINARY_HEADER`, otherwise this function will panic.
 pub fn package_binary(data: Vec<u8>) -> WsMessage {

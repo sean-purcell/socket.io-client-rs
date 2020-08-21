@@ -21,6 +21,8 @@ use futures::{
 };
 use url::Url;
 
+use socket_io_protocol::engine;
+
 mod callbacks;
 mod emit;
 pub mod protocol;
@@ -35,7 +37,6 @@ pub struct Client {
     pub send: mpsc::UnboundedSender<Vec<WsMessage>>,
     close_handle: Option<(oneshot::Sender<()>, RemoteHandle<Result<(), Error>>)>,
     callbacks: Arc<Mutex<Callbacks>>,
-    _receiver: Receiver,
     next_id: u64,
 }
 
@@ -49,6 +50,8 @@ pub enum Error {
     ConnectionError(Box<dyn StdError + Send>),
     #[error("Failed to spawn task: {0}")]
     SpawnError(#[from] SpawnError),
+    #[error("Error processing packet: {0}")]
+    ProcessingError(#[from] receiver::Error),
     #[error("Already closed")]
     AlreadyClosed,
 }
@@ -148,17 +151,19 @@ impl Client {
 
         let (stream, _) = async_tls::client_async_tls(url.to_string(), connection).await?;
 
-        let (send, receive, close, handle) = process_websocket(stream, spawn).await?;
-
         let callbacks = Arc::new(Mutex::new(Callbacks::new()));
 
-        let _receiver = Receiver::new(receive, send.clone(), callbacks.clone(), spawn)?;
+        let (send, close, open, handle) =
+            process_websocket(stream, callbacks.clone(), spawn).await?;
+
+        let open = open.await.unwrap();
+
+        log::info!("Received open: {:?}", open);
 
         Ok(Client {
             send,
             close_handle: Some((close, handle)),
             callbacks,
-            _receiver,
             next_id: 0,
         })
     }
@@ -206,12 +211,13 @@ impl Client {
 
 async fn process_websocket<S>(
     stream: WebSocketStream<S>,
+    callbacks: Arc<Mutex<Callbacks>>,
     spawn: &impl Spawn,
 ) -> Result<
     (
         mpsc::UnboundedSender<Vec<WsMessage>>,
-        mpsc::UnboundedReceiver<WsMessage>,
         oneshot::Sender<()>,
+        oneshot::Receiver<engine::Open>,
         RemoteHandle<Result<(), Error>>,
     ),
     SpawnError,
@@ -221,8 +227,10 @@ where
 {
     let (mut sink, mut stream) = stream.split();
     let (send_tx, mut send_rx) = mpsc::unbounded::<Vec<WsMessage>>();
-    let (mut receive_tx, receive_rx) = mpsc::unbounded();
     let (close_tx, close_rx) = oneshot::channel();
+    let (open_tx, open_rx) = oneshot::channel();
+
+    let mut receiver = Receiver::new(send_tx.clone(), callbacks, open_tx);
 
     let task = || async move {
         let mut next = stream.next().fuse();
@@ -242,10 +250,7 @@ where
                     };
                     next = stream.next().fuse();
                     match msg {
-                        Ok(msg) => receive_tx
-                            .send(msg)
-                            .await
-                            .expect("Receiver dropped unexpectedly"),
+                        Ok(msg) => receiver.process_websocket_packet(msg)?,
                         Err(e) => return Err(e.into()),
                     }
                 }
@@ -255,7 +260,7 @@ where
                         None => panic!("Sending stream closed unexpectedly"),
                     };
                     for msg in msgs.into_iter() {
-                        log::trace!("sending message: {:?}", msg);
+                        log::trace!("Sending websocket packet: {:?}", msg);
                         match sink.send(msg).await {
                             Ok(()) => (),
                             Err(e) => return Err(e.into()),
@@ -274,10 +279,7 @@ where
         // Now we want to keep reading until the stream closed
         loop {
             match ws_stream.next().await {
-                Some(Ok(msg)) => receive_tx
-                    .send(msg)
-                    .await
-                    .expect("Receiver dropped unexpectedly"),
+                Some(Ok(msg)) => receiver.process_websocket_packet(msg)?,
                 Some(Err(e)) => return Err(e.into()),
                 None => return Ok(()), // Connection closed without errors
             }
@@ -286,7 +288,7 @@ where
 
     let handle = spawn.spawn_with_handle(task())?;
 
-    Ok((send_tx, receive_rx, close_tx, handle))
+    Ok((send_tx, close_tx, open_rx, handle))
 }
 
 fn parse_url(url: &str) -> Result<Url, UrlError> {

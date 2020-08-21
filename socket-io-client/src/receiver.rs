@@ -1,19 +1,15 @@
 use std::{
     borrow::Cow,
-    fmt,
     sync::{Arc, Mutex},
 };
 
 use async_tungstenite::tungstenite::Message as WsMessage;
-use futures::{
-    channel::mpsc,
-    future::{Future, RemoteHandle},
-    stream::StreamExt,
-    task::{Spawn, SpawnError, SpawnExt},
-};
+use futures::channel::{mpsc, oneshot};
 
 use socket_io_protocol::{
-    engine::{Decoder, Error as EngineError, Message as EngineMessage, Packet as EnginePacket},
+    engine::{
+        self, Decoder, Error as EngineError, Message as EngineMessage, Packet as EnginePacket,
+    },
     socket::{self, ArgsError, Data, DeserializeResult, Error as SocketError, Packet, Partial},
 };
 
@@ -34,7 +30,11 @@ pub enum Error {
 }
 
 pub struct Receiver {
-    _handle: RemoteHandle<Result<(), Error>>,
+    decoder: Decoder,
+    in_progress: Option<InProgress>,
+    sender: mpsc::UnboundedSender<Vec<WsMessage>>,
+    callbacks: Arc<Mutex<Callbacks>>,
+    open: Option<oneshot::Sender<engine::Open>>,
 }
 
 struct InProgress {
@@ -44,42 +44,87 @@ struct InProgress {
 
 impl Receiver {
     pub fn new(
-        receiver: mpsc::UnboundedReceiver<WsMessage>,
         sender: mpsc::UnboundedSender<Vec<WsMessage>>,
         callbacks: Arc<Mutex<Callbacks>>,
-        spawn: &impl Spawn,
-    ) -> Result<Receiver, SpawnError> {
-        let _handle =
-            spawn.spawn_with_handle(log_errors(receive_task(receiver, sender, callbacks)))?;
-        Ok(Receiver { _handle })
-    }
-}
-
-async fn log_errors<F, T, E>(f: F) -> Result<T, E>
-where
-    F: 'static + Future<Output = Result<T, E>> + Send,
-    E: fmt::Display,
-{
-    match f.await {
-        Ok(value) => Ok(value),
-        Err(err) => {
-            log::error!("Error occurred in receiver task: {}", err);
-            Err(err)
+        open: oneshot::Sender<engine::Open>,
+    ) -> Receiver {
+        Receiver {
+            decoder: Decoder::new(),
+            in_progress: None,
+            sender,
+            callbacks,
+            open: Some(open),
         }
     }
-}
 
-async fn receive_task(
-    mut receiver: mpsc::UnboundedReceiver<WsMessage>,
-    sender: mpsc::UnboundedSender<Vec<WsMessage>>,
-    callbacks: Arc<Mutex<Callbacks>>,
-) -> Result<(), Error> {
-    let mut decoder = Decoder::new();
+    pub fn process_websocket_packet(&mut self, msg: WsMessage) -> Result<(), Error> {
+        log::trace!("Received WebSocket packet: {:?}", msg);
+        match msg {
+            WsMessage::Close(frame) => {
+                log::debug!("Closed with close frame {:?}", frame);
+                Ok(())
+            }
+            WsMessage::Ping(_) | WsMessage::Pong(_) => Ok(()), // already handled by tungstenite
+            WsMessage::Text(text) => self.process_message(WsMessage::Text(text)),
+            WsMessage::Binary(data) => self.process_message(WsMessage::Binary(data)),
+        }
+    }
 
-    let mut in_progress: Option<InProgress> = None;
+    fn process_message(&mut self, msg: WsMessage) -> Result<(), Error> {
+        let packet = self.decoder.decode(msg)?;
+        match packet {
+            EnginePacket::Open(open) => {
+                // TODO: forward this info to the client
+                log::trace!("Received open engine packet: {:?}", open);
+                if let Some(send) = self.open.take() {
+                    let _ = send.send(open);
+                } else {
+                    log::warn!("Received second open engine packet: {:?}", open);
+                }
+                Ok(())
+            }
+            EnginePacket::Close => {
+                log::trace!("Received close engine packet");
+                Ok(())
+            }
+            EnginePacket::Ping => {
+                log::trace!("Received engine ping packet");
+                let _ = self.sender.unbounded_send(vec![engine::encode_pong()]);
+                // TODO: send message to timer task to reset the timeout
+                Ok(())
+            }
+            EnginePacket::Pong => {
+                log::trace!("Received engine ping packet");
+                // TODO: send message to timer task to reset the timeout
+                Ok(())
+            }
+            EnginePacket::Message(msg) => {
+                log::trace!("Received message engine packet: {:?}", msg);
+                match self.in_progress.take() {
+                    Some(mut ip) => {
+                        ip.add(msg);
+                        if ip.ready() {
+                            let packet = ip.deserialize()?;
+                            self.process_packet(packet)?;
+                        } else {
+                            self.in_progress = Some(ip);
+                        }
+                        Ok(())
+                    }
+                    None => match socket::deserialize(msg)? {
+                        DeserializeResult::Packet(packet) => self.process_packet(packet),
+                        DeserializeResult::DataNeeded(partial) => {
+                            self.in_progress = Some(InProgress::new(partial));
+                            Ok(())
+                        }
+                    },
+                }
+            }
+        }
+    }
 
-    let process_packet = |packet: Packet| {
-        log::info!("Received packet: {}", packet);
+    fn process_packet(&mut self, packet: Packet) -> Result<(), Error> {
+        log::info!("Received socket packet: {}", packet);
         let namespace = packet.namespace();
         match packet.data() {
             Data::Connect => {
@@ -95,14 +140,19 @@ async fn receive_task(
                     .get(0)
                     .ok_or_else(|| Error::EventNoArgs(packet.clone()))?;
                 let event: Cow<'_, str> = event.deserialize()?;
-                let ack = id.map(|id| AckBuilder::new(sender.clone(), namespace, id));
+                let ack = id.map(|id| AckBuilder::new(self.sender.clone(), namespace, id));
                 // TODO: Use id to create ack callback
-                if let Some(mut cb) = callbacks.lock().unwrap().get_event(namespace, &*event) {
+                if let Some(mut cb) = self.callbacks.lock().unwrap().get_event(namespace, &*event) {
                     cb.call(&args, ack);
                 }
             }
             Data::Ack { id, args } => {
-                if let Some(cb) = callbacks.lock().unwrap().get_and_clear_ack(namespace, id) {
+                if let Some(cb) = self
+                    .callbacks
+                    .lock()
+                    .unwrap()
+                    .get_and_clear_ack(namespace, id)
+                {
                     cb.call(&args);
                 } else {
                     return Err(Error::UnexpectedAck(packet.clone()));
@@ -110,63 +160,7 @@ async fn receive_task(
             }
         };
         Ok(())
-    };
-
-    let mut process_message = |msg| {
-        let packet = decoder.decode(msg)?;
-        match packet {
-            EnginePacket::Open(open) => {
-                // TODO: forward this info to the client
-                log::info!("Received open packet: {:?}", open);
-            }
-            EnginePacket::Close => {
-                log::info!("Received close");
-            }
-            EnginePacket::Ping => {
-                // TODO: send pong when we have a serializer
-            }
-            EnginePacket::Pong => {
-                // TODO: send message to timer task to reset the timeout
-            }
-            EnginePacket::Message(msg) => {
-                log::info!("Received message packet: {:?}", msg);
-                match in_progress.take() {
-                    Some(mut ip) => {
-                        ip.add(msg);
-                        if ip.ready() {
-                            let packet = ip.deserialize()?;
-                            process_packet(packet)?;
-                        } else {
-                            in_progress = Some(ip);
-                        }
-                    }
-                    None => match socket::deserialize(msg)? {
-                        DeserializeResult::Packet(packet) => process_packet(packet)?,
-                        DeserializeResult::DataNeeded(partial) => {
-                            in_progress = Some(InProgress::new(partial));
-                        }
-                    },
-                }
-            }
-        }
-        let result: Result<(), Error> = Ok(());
-        result
-    };
-
-    while let Some(msg) = receiver.next().await {
-        log::info!("message received: {:?}", msg);
-        match msg {
-            WsMessage::Close(frame) => {
-                log::debug!("Closed with close frame {:?}", frame);
-                return Ok(());
-            }
-            WsMessage::Ping(_) | WsMessage::Pong(_) => (), // handled at a lower layer
-            WsMessage::Text(text) => process_message(WsMessage::Text(text))?,
-            WsMessage::Binary(data) => process_message(WsMessage::Binary(data))?,
-        }
     }
-
-    Ok(())
 }
 
 impl InProgress {
