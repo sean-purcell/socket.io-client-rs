@@ -19,9 +19,9 @@ pub enum Packet {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Open {
-    sid: String,
-    ping_timeout: u64,
-    ping_interval: u64,
+    pub sid: String,
+    pub ping_timeout: u64,
+    pub ping_interval: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]

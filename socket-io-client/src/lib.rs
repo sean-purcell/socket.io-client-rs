@@ -3,41 +3,33 @@
 use std::{
     error::Error as StdError,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
-use async_tungstenite::{
-    async_tls,
-    tungstenite::{Error as WsError, Message as WsMessage},
-    WebSocketStream,
-};
+use async_tungstenite::tungstenite::{Error as WsError, Message as WsMessage};
 use futures::{
-    channel::{mpsc, oneshot},
-    future::{Future, FutureExt, RemoteHandle},
+    channel::mpsc,
+    future::Future,
     io::{AsyncRead, AsyncWrite},
-    select,
-    sink::SinkExt,
-    stream::StreamExt,
-    task::{Spawn, SpawnError, SpawnExt},
+    task::{Spawn, SpawnError},
 };
 use url::Url;
 
-use socket_io_protocol::engine;
-
 mod callbacks;
+mod connection;
 mod emit;
 pub mod protocol;
 mod receiver;
 
 use callbacks::Callbacks;
 pub use callbacks::{AckCallback, EventCallback};
+use connection::Connection;
 pub use emit::{AckArgsBuilder, AckBuilder, EventArgsBuilder, EventBuilder};
 use receiver::Receiver;
 
-type CloseHandle = (oneshot::Sender<()>, RemoteHandle<Result<(), Error>>);
-
 pub struct Client {
+    connection: Connection,
     pub send: mpsc::UnboundedSender<Vec<WsMessage>>,
-    close_handle: Option<CloseHandle>,
     callbacks: Arc<Mutex<Callbacks>>,
     next_id: u64,
 }
@@ -54,6 +46,8 @@ pub enum Error {
     SpawnError(#[from] SpawnError),
     #[error("Error processing packet: {0}")]
     ProcessingError(#[from] receiver::Error),
+    #[error("Connection timed out")]
+    Timeout,
     #[error("Already closed")]
     AlreadyClosed,
 }
@@ -151,30 +145,29 @@ impl Client {
     {
         add_socketio_query_params(&mut url);
 
-        let (stream, _) = async_tls::client_async_tls(url.to_string(), connection).await?;
-
         let callbacks = Arc::new(Mutex::new(Callbacks::new()));
 
-        let (send, close, open, handle) =
-            process_websocket(stream, callbacks.clone(), spawn).await?;
+        let connection = Connection::new(
+            url,
+            connection,
+            None,
+            callbacks.clone(),
+            Duration::from_secs(10),
+            spawn,
+        )
+        .await?;
 
-        let open = open.await.unwrap();
-
-        log::info!("Received open: {:?}", open);
-
+        let send = connection.sender();
         Ok(Client {
+            connection,
             send,
-            close_handle: Some((close, handle)),
             callbacks,
             next_id: 0,
         })
     }
 
     pub async fn close(&mut self) -> Result<(), Error> {
-        let (close, handle) = self.close_handle.take().ok_or(Error::AlreadyClosed)?;
-
-        let _ = close.send(());
-        handle.await
+        self.connection.close().await
     }
 
     /// Create an `EmitBuilder` to emit an event for the given namespace.
@@ -209,88 +202,6 @@ impl Client {
         /// Clears the fallback callback for this namespace.
         clear fallback()
     }
-}
-
-async fn process_websocket<S>(
-    stream: WebSocketStream<S>,
-    callbacks: Arc<Mutex<Callbacks>>,
-    spawn: &impl Spawn,
-) -> Result<
-    (
-        mpsc::UnboundedSender<Vec<WsMessage>>,
-        oneshot::Sender<()>,
-        oneshot::Receiver<engine::Open>,
-        RemoteHandle<Result<(), Error>>,
-    ),
-    SpawnError,
->
-where
-    S: 'static + Unpin + AsyncRead + AsyncWrite + Send,
-{
-    let (mut sink, mut stream) = stream.split();
-    let (send_tx, mut send_rx) = mpsc::unbounded::<Vec<WsMessage>>();
-    let (close_tx, close_rx) = oneshot::channel();
-    let (open_tx, open_rx) = oneshot::channel();
-
-    let mut receiver = Receiver::new(send_tx.clone(), callbacks, open_tx);
-
-    let task = || async move {
-        let mut next = stream.next().fuse();
-        let mut closed = close_rx.fuse();
-        loop {
-            select! {
-                result = next => {
-                    let msg = match result {
-                        Some(msg) => {
-                            log::trace!("received message: {:?}", msg);
-                            msg
-                        },
-                        None => {
-                            log::trace!("got None, stream ended");
-                            return Ok(()); // Connection closed without errors
-                        }
-                    };
-                    next = stream.next().fuse();
-                    match msg {
-                        Ok(msg) => receiver.process_websocket_packet(msg)?,
-                        Err(e) => return Err(e.into()),
-                    }
-                }
-                result = send_rx.next() => {
-                    let msgs = match result {
-                        Some(msg) => msg,
-                        None => panic!("Sending stream closed unexpectedly"),
-                    };
-                    for msg in msgs.into_iter() {
-                        log::trace!("Sending websocket packet: {:?}", msg);
-                        match sink.send(msg).await {
-                            Ok(()) => (),
-                            Err(e) => return Err(e.into()),
-                        }
-                    }
-                }
-                _ = closed => {
-                    break;
-                }
-            }
-        }
-        drop(next);
-        let mut ws_stream = sink.reunite(stream).expect("Reunite should succeed");
-        log::debug!("Sending close message");
-        let _ = ws_stream.close(None).await;
-        // Now we want to keep reading until the stream closed
-        loop {
-            match ws_stream.next().await {
-                Some(Ok(msg)) => receiver.process_websocket_packet(msg)?,
-                Some(Err(e)) => return Err(e.into()),
-                None => return Ok(()), // Connection closed without errors
-            }
-        }
-    };
-
-    let handle = spawn.spawn_with_handle(task())?;
-
-    Ok((send_tx, close_tx, open_rx, handle))
 }
 
 fn parse_url(url: &str) -> Result<Url, UrlError> {
