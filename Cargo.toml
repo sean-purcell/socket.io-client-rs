@@ -1,7 +1,6 @@
 [workspace]
 
 members = [
-    "async_flag",
     "owned_subslice",
     "socket-io-client",
     "socket-io-protocol",
