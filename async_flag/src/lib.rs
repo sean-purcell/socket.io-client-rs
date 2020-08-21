@@ -15,6 +15,7 @@ use pin_project::pin_project;
 
 type WrappedWaker = Arc<Mutex<Option<Waker>>>;
 
+/// The error type returned when the setter is dropped.
 #[derive(Debug, thiserror::Error, PartialEq)]
 #[error("Setter dropped without setting the flag")]
 pub struct SetterDropped;
