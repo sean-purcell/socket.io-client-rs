@@ -15,7 +15,7 @@ use pin_project::pin_project;
 
 type WrappedWaker = Arc<Mutex<Option<Waker>>>;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, PartialEq)]
 #[error("Setter dropped without setting the flag")]
 pub struct SetterDropped;
 
@@ -75,6 +75,7 @@ impl State {
 }
 
 impl Setter {
+    /// Set the flag and wake all `Waiter`s that are waiting on it.
     pub fn set(mut self) {
         self.i
             .take()
@@ -136,6 +137,101 @@ impl Clone for Waiter {
             f: self.f.clone(),
             wait_sender: self.wait_sender.clone(),
             waiter: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::time::Duration;
+
+    use futures::pin_mut;
+
+    #[tokio::test(core_threads = 4)]
+    async fn test_simple() {
+        let (set, wait) = flag();
+
+        set.set();
+
+        assert_eq!(wait.await, Ok(()));
+    }
+
+    #[tokio::test(core_threads = 4)]
+    async fn test_dropped() {
+        let (set, wait) = flag();
+
+        drop(set);
+
+        assert_eq!(wait.await, Err(SetterDropped {}));
+    }
+
+    #[tokio::test(core_threads = 4)]
+    async fn test_multiple() {
+        let (set, wait) = flag();
+
+        let handles: Vec<_> = (0..10)
+            .map(|_| {
+                let w = wait.clone();
+                tokio::spawn(async move { w.await.unwrap() })
+            })
+            .collect();
+
+        tokio::time::delay_for(Duration::from_millis(100)).await;
+
+        set.set();
+
+        for h in handles.into_iter() {
+            pin_mut!(h);
+            h.await.unwrap()
+        }
+
+        assert_eq!(wait.await, Ok(()));
+    }
+
+    #[pin_project]
+    struct AlwaysWake<T> {
+        #[pin]
+        t: T,
+    }
+
+    impl<T: Future> Future for AlwaysWake<T> {
+        type Output = T::Output;
+        fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+            let this = self.project();
+            let r = this.t.poll(cx);
+            if r.is_pending() {
+                cx.waker().wake_by_ref();
+            }
+            r
+        }
+    }
+
+    #[tokio::test(core_threads = 4)]
+    async fn test_racing() {
+        for _ in 0..10 {
+            let (set, wait) = flag();
+
+            let handles: Vec<_> = (0..50)
+                .map(|_| {
+                    let w = wait.clone();
+                    tokio::spawn(AlwaysWake {
+                        t: async move { w.await.unwrap() },
+                    })
+                })
+                .collect();
+
+            tokio::time::delay_for(Duration::from_millis(10)).await;
+
+            set.set();
+
+            for h in handles.into_iter() {
+                pin_mut!(h);
+                h.await.unwrap()
+            }
+
+            assert_eq!(wait.await, Ok(()));
         }
     }
 }
