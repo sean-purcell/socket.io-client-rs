@@ -157,8 +157,8 @@ mod tests {
     fn test_simple() {
         let mut callbacks = Callbacks::new();
 
-        let c0: EventCallback = (|_args: &Args| {}).into();
-        let c1: EventCallback = (|_args: &Args| {}).into();
+        let c0: EventCallback = (|_args: &Args, _ack| {}).into();
+        let c1: EventCallback = (|_args: &Args, _ack| {}).into();
         let c2: AckCallback = (|_args: &Args| {}).into();
         callbacks.set_event("/", "msg", c0.clone());
         callbacks.set_fallback("/", c1.clone());
