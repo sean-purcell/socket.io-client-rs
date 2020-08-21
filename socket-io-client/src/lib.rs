@@ -33,9 +33,11 @@ pub use callbacks::{AckCallback, EventCallback};
 pub use emit::{AckArgsBuilder, AckBuilder, EventArgsBuilder, EventBuilder};
 use receiver::Receiver;
 
+type CloseHandle = (oneshot::Sender<()>, RemoteHandle<Result<(), Error>>);
+
 pub struct Client {
     pub send: mpsc::UnboundedSender<Vec<WsMessage>>,
-    close_handle: Option<(oneshot::Sender<()>, RemoteHandle<Result<(), Error>>)>,
+    close_handle: Option<CloseHandle>,
     callbacks: Arc<Mutex<Callbacks>>,
     next_id: u64,
 }

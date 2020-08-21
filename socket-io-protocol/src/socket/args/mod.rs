@@ -45,6 +45,10 @@ impl<'a> Args<'a> {
         self.args.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn get(&self, idx: usize) -> Option<Arg<'a>> {
         self.args.get(idx).map(|range| Arg {
             arg: &self.message[range.clone()],
@@ -52,7 +56,7 @@ impl<'a> Args<'a> {
         })
     }
 
-    pub fn iter<'b>(&'b self) -> impl Iterator<Item = Arg<'b>> {
+    pub fn iter(&self) -> impl Iterator<Item = Arg<'_>> {
         ArgsIter { args: self, idx: 0 }
     }
 }
@@ -62,7 +66,7 @@ impl<'a> Arg<'a> {
         // We can unwrap because if the json was going to fail to deserialize we would have failed
         // to parse
         let mut value = serde_json::from_str(self.arg).unwrap();
-        if self.attachments.len() > 0 {
+        if !self.attachments.is_empty() {
             fill_placeholders_value(&mut value, &self.attachments)?;
         }
         Ok(value)
@@ -72,7 +76,7 @@ impl<'a> Arg<'a> {
     where
         T: Deserialize<'a>,
     {
-        (if self.attachments.len() > 0 {
+        (if !self.attachments.is_empty() {
             deserialize_attachments::deserialize(self.arg, self.attachments)
         } else {
             serde_json::from_str(self.arg)

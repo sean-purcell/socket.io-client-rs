@@ -95,7 +95,7 @@ impl Callbacks {
         let ns = self.namespaces.get(namespace)?;
         ns.events
             .get(event)
-            .or(ns.fallback.as_ref())
+            .or_else(|| ns.fallback.as_ref())
             .map(EventCallback::clone)
     }
 

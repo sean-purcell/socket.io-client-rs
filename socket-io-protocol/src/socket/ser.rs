@@ -81,7 +81,7 @@ impl PacketBuilder {
                 approach: Approach::Binary {
                     kind,
                     namespace,
-                    id: id,
+                    id,
                     attachments: Vec::new(),
                 },
                 first: true,

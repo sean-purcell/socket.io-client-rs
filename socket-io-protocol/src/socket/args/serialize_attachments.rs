@@ -138,7 +138,7 @@ macro_rules! serialize_forward_compound {
 }
 
 impl<'a, S> Wrapper<'a, S> {
-    fn new<P>(&self, p: P) -> Wrapper<'a, P> {
+    fn transform<P>(&self, p: P) -> Wrapper<'a, P> {
         Wrapper {
             s: p,
             buffers: self.buffers,
@@ -238,7 +238,7 @@ where
     S: Serialize,
 {
     fn serialize<T: Serializer>(&self, serializer: T) -> Result<T::Ok, T::Error> {
-        self.s.serialize(self.new(serializer))
+        self.s.serialize(self.transform(serializer))
     }
 }
 
@@ -250,7 +250,7 @@ where
     type Error = S::Error;
 
     fn serialize_element<T: ?Sized + Serialize>(&mut self, v: &T) -> Result<(), Self::Error> {
-        self.s.serialize_element(&self.new(v))
+        self.s.serialize_element(&self.transform(v))
     }
 
     fn end(self) -> Result<Self::Ok, Self::Error> {
@@ -266,7 +266,7 @@ where
     type Error = S::Error;
 
     fn serialize_field<T: ?Sized + Serialize>(&mut self, v: &T) -> Result<(), Self::Error> {
-        self.s.serialize_field(&self.new(v))
+        self.s.serialize_field(&self.transform(v))
     }
 
     fn end(self) -> Result<Self::Ok, Self::Error> {
@@ -282,7 +282,7 @@ where
     type Error = S::Error;
 
     fn serialize_field<T: ?Sized + Serialize>(&mut self, v: &T) -> Result<(), Self::Error> {
-        self.s.serialize_field(&self.new(v))
+        self.s.serialize_field(&self.transform(v))
     }
 
     fn end(self) -> Result<Self::Ok, Self::Error> {
@@ -298,11 +298,11 @@ where
     type Error = S::Error;
 
     fn serialize_key<T: ?Sized + Serialize>(&mut self, v: &T) -> Result<(), Self::Error> {
-        self.s.serialize_key(&self.new(v))
+        self.s.serialize_key(&self.transform(v))
     }
 
     fn serialize_value<T: ?Sized + Serialize>(&mut self, v: &T) -> Result<(), Self::Error> {
-        self.s.serialize_value(&self.new(v))
+        self.s.serialize_value(&self.transform(v))
     }
 
     fn serialize_entry<K: ?Sized + Serialize, V: ?Sized + Serialize>(
@@ -310,7 +310,8 @@ where
         k: &K,
         v: &V,
     ) -> Result<(), Self::Error> {
-        self.s.serialize_entry(&self.new(k), &self.new(v))
+        self.s
+            .serialize_entry(&self.transform(k), &self.transform(v))
     }
 
     fn end(self) -> Result<Self::Ok, Self::Error> {
@@ -330,7 +331,7 @@ where
         key: &'static str,
         v: &T,
     ) -> Result<(), Self::Error> {
-        self.s.serialize_field(key, &self.new(v))
+        self.s.serialize_field(key, &self.transform(v))
     }
 
     fn skip_field(&mut self, key: &'static str) -> Result<(), Self::Error> {
@@ -354,7 +355,7 @@ where
         key: &'static str,
         v: &T,
     ) -> Result<(), Self::Error> {
-        self.s.serialize_field(key, &self.new(v))
+        self.s.serialize_field(key, &self.transform(v))
     }
 
     fn skip_field(&mut self, key: &'static str) -> Result<(), Self::Error> {
@@ -379,7 +380,7 @@ where
         match &mut self.state {
             BytesState::Bytes { s, data, len } => match v.serialize(SeqElementSerializer {}) {
                 Ok(b) => {
-                    if data.len() == 0 {
+                    if data.is_empty() {
                         data.push(engine::BINARY_HEADER);
                     }
                     data.push(b);
@@ -409,7 +410,7 @@ where
     fn end(self) -> Result<Self::Ok, Self::Error> {
         match self.state {
             BytesState::Bytes { s, data, len: _ } => {
-                if data.len() == 0 {
+                if data.is_empty() {
                     let seq = s.unwrap().serialize_seq(Some(0))?;
                     seq.end()
                 } else {

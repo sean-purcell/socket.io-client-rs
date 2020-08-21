@@ -124,8 +124,9 @@ fn deserialize_text(text: OwnedSubslice<String>) -> Result<DeserializeResult, Er
     let parse = parse_text(text)?;
 
     match parse.kind {
-        ProtocolKind::Connect => deserialize_dataless(parse, Kind::Connect, "connect")
-            .map(|p| DeserializeResult::Packet(p)),
+        ProtocolKind::Connect => {
+            deserialize_dataless(parse, Kind::Connect, "connect").map(DeserializeResult::Packet)
+        }
         ProtocolKind::Disconnect => deserialize_dataless(parse, Kind::Disconnect, "disconnect")
             .map(DeserializeResult::Packet),
         ProtocolKind::Event => deserialize_event(parse, Kind::Event, "event", Vec::new())
@@ -139,7 +140,7 @@ fn deserialize_text(text: OwnedSubslice<String>) -> Result<DeserializeResult, Er
 }
 
 fn deserialize_dataless(parse: Parse, kind: Kind, name: &'static str) -> Result<Packet, Error> {
-    if parse.attachments.is_some() || parse.id.is_some() || parse.args.len() > 0 {
+    if parse.attachments.is_some() || parse.id.is_some() || !parse.args.is_empty() {
         return Err(Error::InvalidExtraData(name, parse.message.to_string()));
     }
     Ok(Packet {
@@ -195,7 +196,7 @@ fn deserialize_event(
     name: &'static str,
     attachments: Vec<OwnedSubslice<Vec<u8>>>,
 ) -> Result<Packet, Error> {
-    if (kind == Kind::Ack && parse.id.is_none()) || parse.args.len() == 0 {
+    if (kind == Kind::Ack && parse.id.is_none()) || parse.args.is_empty() {
         return Err(Error::MissingData(name, parse.message.to_string()));
     }
     if attachments.len() as u64 != parse.attachments.unwrap_or(0) {
